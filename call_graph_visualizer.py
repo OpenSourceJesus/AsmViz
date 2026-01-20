@@ -39,7 +39,7 @@ class FunctionNode(QGraphicsRectItem):
         self.assembly = assembly
         self.setPos(x, y)
         self.setPen(QPen(QColor(50, 100, 200), 2))
-        self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, False)
         self.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
         
         # Set rounded rectangle appearance
@@ -231,16 +231,6 @@ class CallGraphVisualizer(QMainWindow):
         self.open_button.clicked.connect(self.open_file)
         control_layout.addWidget(self.open_button)
         
-        self.layout_button = QPushButton("Auto Layout")
-        self.layout_button.clicked.connect(self.auto_layout)
-        self.layout_button.setEnabled(False)
-        control_layout.addWidget(self.layout_button)
-        
-        self.clear_button = QPushButton("Clear")
-        self.clear_button.clicked.connect(self.clear_graph)
-        self.clear_button.setEnabled(False)
-        control_layout.addWidget(self.clear_button)
-        
         control_layout.addStretch()
         
         self.status_label = QLabel("No file loaded")
@@ -269,8 +259,6 @@ class CallGraphVisualizer(QMainWindow):
             
             self.status_label.setText(f"Loaded: {filename} ({len(self.functions)} functions)")
             self.draw_graph()
-            self.layout_button.setEnabled(True)
-            self.clear_button.setEnabled(True)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to parse file:\n{str(e)}")
     
@@ -294,8 +282,6 @@ class CallGraphVisualizer(QMainWindow):
         self.function_info = {}
         self.current_filename = None
         self.status_label.setText("No file loaded")
-        self.layout_button.setEnabled(False)
-        self.clear_button.setEnabled(False)
     
     def draw_graph(self):
         """Draw the call graph."""
