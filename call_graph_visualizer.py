@@ -85,21 +85,46 @@ class PanGraphicsView(QGraphicsView):
 class FunctionNode(QGraphicsRectItem):
     """Represents a function node with signature and assembly body."""
     
-    def __init__(self, name, signature, assembly, x, y, width=None, min_height=60):
+    def __init__(self, name, signature, assembly, x, y, width=None, min_height=60, calls=None, function_info=None):
         # Calculate required width based on content
         if width is None:
             width = self.calculate_required_width(signature, assembly)
         
+        # Extract registers
+        self.calls = calls if calls is not None else {}
+        self.function_info = function_info if function_info is not None else {}
+        
+        # Get registers used in this function
+        func_registers = self.extract_registers_from_assembly(assembly)
+        
+        # Get registers used in function and its call graph (function's own + all callees)
+        call_graph_registers = self.extract_registers_from_call_graph(name, assembly)
+        # Include the function's own registers in the call graph list
+        call_graph_registers.update(func_registers)
+        
+        # Format register displays with color-coding
+        func_registers_text = self.format_registers(func_registers)
+        call_graph_registers_text = self.format_registers(call_graph_registers)
+        
         # Calculate required heights
         signature_height = self.calculate_text_height(signature, width - 10, 7, bold=True, is_html=False)
+        
+        # Calculate label heights
+        label_height = self.calculate_text_height("Registers (function + call graph):", width - 10, 7, bold=True, is_html=False)
+        label_height2 = self.calculate_text_height("Registers (function only):", width - 10, 7, bold=True, is_html=False)
+        
+        call_graph_registers_height = self.calculate_text_height(call_graph_registers_text, width - 10, 7, bold=False, is_html=True)
+        func_registers_height = self.calculate_text_height(func_registers_text, width - 10, 7, bold=False, is_html=True)
         formatted_asm = self.format_assembly(assembly)
         assembly_height = self.calculate_text_height(formatted_asm, width - 10, 7, bold=False, is_html=True)
         
         # Set heights with more generous padding to prevent cutoff
         signature_rect_height = max(40, signature_height + 15)  # Min 40, or content + padding
+        call_graph_registers_rect_height = max(50, label_height + call_graph_registers_height + 20)  # Min 50, or label + content + padding
+        func_registers_rect_height = max(50, label_height2 + func_registers_height + 20)  # Min 50, or label + content + padding
         assembly_rect_height = max(60, assembly_height + 20)  # Min 60, or content + more padding
         
-        total_height = signature_rect_height + assembly_rect_height
+        total_height = signature_rect_height + call_graph_registers_rect_height + func_registers_rect_height + assembly_rect_height
         
         super().__init__(0, 0, width, total_height)
         self.name = name
@@ -113,15 +138,27 @@ class FunctionNode(QGraphicsRectItem):
         # Set rounded rectangle appearance
         self.setBrush(QBrush(QColor(100, 150, 255)))
         
-        # Create two rectangles for signature and body
+        # Create four rectangles stacked vertically
         corner_radius = 10
         
-        # Top rectangle (signature)
-        self.signature_rect = QRectF(0, 0, width, signature_rect_height)
+        # Rectangle 1: Top rectangle (signature)
+        y_offset = 0
+        self.signature_rect = QRectF(0, y_offset, width, signature_rect_height)
         self.signature_brush = QBrush(QColor(80, 130, 235))
         
-        # Bottom rectangle (assembly) - dynamically sized
-        self.body_rect = QRectF(0, signature_rect_height, width, assembly_rect_height)
+        # Rectangle 2: Registers in function + call graph
+        y_offset += signature_rect_height
+        self.call_graph_registers_rect = QRectF(0, y_offset, width, call_graph_registers_rect_height)
+        self.call_graph_registers_brush = QBrush(QColor(90, 140, 245))
+        
+        # Rectangle 3: Registers in function only
+        y_offset += call_graph_registers_rect_height
+        self.func_registers_rect = QRectF(0, y_offset, width, func_registers_rect_height)
+        self.func_registers_brush = QBrush(QColor(95, 145, 250))
+        
+        # Rectangle 4: Bottom rectangle (assembly) - dynamically sized
+        y_offset += func_registers_rect_height
+        self.body_rect = QRectF(0, y_offset, width, assembly_rect_height)
         self.body_brush = QBrush(QColor(100, 150, 255))
         
         # Add signature text
@@ -133,13 +170,56 @@ class FunctionNode(QGraphicsRectItem):
         self.signature_text.setPos(5, 5)
         self.signature_text.setTextWidth(width - 10)
         
+        # Add call graph registers text with label
+        y_offset = signature_rect_height
+        label_text = QGraphicsTextItem("Registers (function + call graph):", self)
+        label_text.setDefaultTextColor(QColor(255, 255, 255))
+        font = QFont("Courier", 7)
+        font.setBold(True)
+        label_text.setFont(font)
+        label_text.setPos(5, y_offset + 5)
+        label_text.setTextWidth(width - 10)
+        
+        self.call_graph_registers_text = QGraphicsTextItem(self)
+        self.call_graph_registers_text.setDefaultTextColor(QColor(255, 255, 255))
+        font = QFont("Courier", 7)
+        font.setBold(False)
+        self.call_graph_registers_text.setFont(font)
+        label_height = label_text.boundingRect().height()
+        self.call_graph_registers_text.setPos(5, y_offset + 5 + label_height + 2)
+        self.call_graph_registers_text.setTextWidth(width - 10)
+        self.call_graph_registers_text.setHtml(call_graph_registers_text)
+        self.call_graph_registers_text.setOpenExternalLinks(False)
+        
+        # Add function registers text with label
+        y_offset += call_graph_registers_rect_height
+        label_text2 = QGraphicsTextItem("Registers (function only):", self)
+        label_text2.setDefaultTextColor(QColor(255, 255, 255))
+        font = QFont("Courier", 7)
+        font.setBold(True)
+        label_text2.setFont(font)
+        label_text2.setPos(5, y_offset + 5)
+        label_text2.setTextWidth(width - 10)
+        
+        self.func_registers_text = QGraphicsTextItem(self)
+        self.func_registers_text.setDefaultTextColor(QColor(255, 255, 255))
+        font = QFont("Courier", 7)
+        font.setBold(False)
+        self.func_registers_text.setFont(font)
+        label_height2 = label_text2.boundingRect().height()
+        self.func_registers_text.setPos(5, y_offset + 5 + label_height2 + 2)
+        self.func_registers_text.setTextWidth(width - 10)
+        self.func_registers_text.setHtml(func_registers_text)
+        self.func_registers_text.setOpenExternalLinks(False)
+        
         # Add assembly text (using HTML for color-coding)
+        y_offset += func_registers_rect_height
         self.assembly_text = QGraphicsTextItem(self)
         # Set default text color for non-register text
         self.assembly_text.setDefaultTextColor(QColor(255, 255, 255))
         font = QFont("Courier", 7)
         self.assembly_text.setFont(font)
-        self.assembly_text.setPos(5, signature_rect_height + 5)
+        self.assembly_text.setPos(5, y_offset + 5)
         self.assembly_text.setTextWidth(width - 10)
         
         # Set HTML content for color-coded assembly
@@ -161,11 +241,165 @@ class FunctionNode(QGraphicsRectItem):
         if required_assembly_height > assembly_rect_height:
             # Update assembly rectangle height
             new_assembly_rect_height = required_assembly_height
-            self.body_rect = QRectF(0, signature_rect_height, width, new_assembly_rect_height)
+            self.body_rect = QRectF(0, signature_rect_height + call_graph_registers_rect_height + func_registers_rect_height, width, new_assembly_rect_height)
             
             # Update total height and main rectangle
-            new_total_height = signature_rect_height + new_assembly_rect_height
+            new_total_height = signature_rect_height + call_graph_registers_rect_height + func_registers_rect_height + new_assembly_rect_height
             self.setRect(0, 0, width, new_total_height)
+    
+    def extract_registers_from_assembly(self, assembly):
+        """Extract unique registers from assembly text."""
+        import re
+        
+        if not assembly or assembly.strip() == "":
+            return set()
+        
+        # Define register patterns (x86-64 registers)
+        reg64 = r'\b(r8|r9|r10|r11|r12|r13|r14|r15|rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|rip)\b'
+        reg32 = r'\b(eax|ebx|ecx|edx|esi|edi|ebp|esp|eip)\b'
+        reg16 = r'\b(ax|bx|cx|dx|si|di|bp|sp|ip)\b'
+        reg8 = r'\b(al|bl|cl|dl|ah|bh|ch|dh|sil|dil|bpl|spl|r8b|r9b|r10b|r11b|r12b|r13b|r14b|r15b)\b'
+        reg_seg = r'\b(cs|ds|es|fs|gs|ss)\b'
+        reg_simd = r'\b(xmm[0-9]+|ymm[0-9]+|zmm[0-9]+|mm[0-7])\b'
+        reg_ctrl = r'\b(cr[0-9]+|dr[0-9]+)\b'
+        
+        all_regs = f'({reg64}|{reg32}|{reg16}|{reg8}|{reg_seg}|{reg_simd}|{reg_ctrl})'
+        
+        # Find all registers (case-insensitive)
+        registers = set()
+        for match in re.finditer(all_regs, assembly, re.IGNORECASE):
+            reg = match.group(0).lower()
+            registers.add(reg)
+        
+        return registers
+    
+    def extract_registers_from_call_graph(self, func_name, assembly):
+        """Extract registers from all functions in the call graph (transitively)."""
+        registers = set()
+        
+        # Recursively get all functions in the call graph (transitive closure)
+        # Use a set to track visited functions to avoid infinite loops in cycles
+        visited = set()
+        
+        def get_all_callees(func):
+            """Recursively get all callees of a function."""
+            if func in visited:
+                return set()  # Already visited, avoid cycles
+            visited.add(func)
+            
+            all_callees = set()
+            called_functions = self.calls.get(func, set())
+            for callee_name in called_functions:
+                # Only include callees that are defined in our function_info
+                if callee_name in self.function_info:
+                    all_callees.add(callee_name)
+                    # Recursively get callees of callees
+                    recursive_callees = get_all_callees(callee_name)
+                    all_callees.update(recursive_callees)
+            
+            return all_callees
+        
+        # Get all transitive callees
+        all_callees = get_all_callees(func_name)
+        
+        # Extract registers from each called function's assembly
+        for callee_name in all_callees:
+            if callee_name in self.function_info:
+                callee_assembly = self.function_info[callee_name].get('assembly', '')
+                if callee_assembly and callee_assembly.strip():
+                    callee_registers = self.extract_registers_from_assembly(callee_assembly)
+                    registers.update(callee_registers)
+        
+        return registers
+    
+    def format_registers(self, registers):
+        """Format registers with color-coding for display."""
+        if not registers:
+            return "No registers"
+        
+        # Sort registers for consistent display
+        sorted_regs = sorted(registers)
+        
+        # Get color for each register using the same color scheme as assembly
+        register_colors = {
+            'a': '#FFFF00',      # Yellow for A registers
+            'b': '#00FF00',      # Green for B registers
+            'c': '#00FFFF',      # Cyan for C registers
+            'd': '#FF00FF',      # Magenta for D registers
+            'si': '#FF8000',     # Orange for SI registers
+            'di': '#FF0080',     # Pink for DI registers
+            'bp': '#80FF00',     # Lime for BP registers
+            'sp': '#0080FF',     # Light blue for SP registers
+            'ip': '#80FFFF',     # Light cyan for IP registers
+            'r8': '#FF8080',     # Light red for R8 registers
+            'r9': '#80FF80',     # Light green for R9 registers
+            'r10': '#8080FF',    # Light blue for R10 registers
+            'r11': '#FFFF80',    # Light yellow for R11 registers
+            'r12': '#FF80FF',    # Light magenta for R12 registers
+            'r13': '#80FFFF',    # Light cyan for R13 registers
+            'r14': '#FFC080',    # Peach for R14 registers
+            'r15': '#C0FF80',    # Light lime for R15 registers
+            'seg': '#FF4040',    # Red-orange for segment registers
+            'simd': '#40FF40',   # Bright green for SIMD registers
+            'ctrl': '#4040FF',   # Blue for control/debug registers
+        }
+        
+        def get_base_register(reg_name):
+            """Get the base register name for color grouping."""
+            reg_lower = reg_name.lower()
+            
+            if reg_lower in ['rax', 'eax', 'ax', 'al', 'ah']:
+                return 'a'
+            elif reg_lower in ['rbx', 'ebx', 'bx', 'bl', 'bh']:
+                return 'b'
+            elif reg_lower in ['rcx', 'ecx', 'cx', 'cl', 'ch']:
+                return 'c'
+            elif reg_lower in ['rdx', 'edx', 'dx', 'dl', 'dh']:
+                return 'd'
+            elif reg_lower in ['rsi', 'esi', 'si', 'sil']:
+                return 'si'
+            elif reg_lower in ['rdi', 'edi', 'di', 'dil']:
+                return 'di'
+            elif reg_lower in ['rbp', 'ebp', 'bp', 'bpl']:
+                return 'bp'
+            elif reg_lower in ['rsp', 'esp', 'sp', 'spl']:
+                return 'sp'
+            elif reg_lower in ['rip', 'eip', 'ip']:
+                return 'ip'
+            elif reg_lower in ['r8', 'r8b']:
+                return 'r8'
+            elif reg_lower in ['r9', 'r9b']:
+                return 'r9'
+            elif reg_lower in ['r10', 'r10b']:
+                return 'r10'
+            elif reg_lower in ['r11', 'r11b']:
+                return 'r11'
+            elif reg_lower in ['r12', 'r12b']:
+                return 'r12'
+            elif reg_lower in ['r13', 'r13b']:
+                return 'r13'
+            elif reg_lower in ['r14', 'r14b']:
+                return 'r14'
+            elif reg_lower in ['r15', 'r15b']:
+                return 'r15'
+            elif reg_lower in ['cs', 'ds', 'es', 'fs', 'gs', 'ss']:
+                return 'seg'
+            elif 'xmm' in reg_lower or 'ymm' in reg_lower or 'zmm' in reg_lower or 'mm' in reg_lower:
+                return 'simd'
+            elif reg_lower.startswith('cr') or reg_lower.startswith('dr'):
+                return 'ctrl'
+            else:
+                return reg_lower
+        
+        # Format registers with color-coding
+        formatted_regs = []
+        for reg in sorted_regs:
+            base_reg = get_base_register(reg)
+            color = register_colors.get(base_reg, '#FFFF00')  # Default to yellow
+            formatted_regs.append(f'<span style="color: {color}; font-weight: bold;">{reg}</span>')
+        
+        # Join with commas and spaces
+        return ', '.join(formatted_regs)
     
     def calculate_required_width(self, signature, assembly):
         """Calculate the minimum width needed to fit signature and assembly without wrapping."""
@@ -240,6 +474,41 @@ class FunctionNode(QGraphicsRectItem):
         """Color-code registers in assembly text using HTML formatting.
         Related registers (e.g., rax, eax, ax, al) use the same color."""
         import re
+        
+        # Clean up assembly: remove function name, initial local labels, and file location annotations
+        lines = assembly.split('\n')
+        cleaned_lines = []
+        skip_initial_labels = True  # Flag to skip initial local labels like .LFB
+        function_name_removed = False  # Track if we've removed the function name
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Remove file location annotations (e.g., '@test_deep_call.s (7-8) ')
+            if re.match(r'^@[^\s]+\.s\s+\(\d+-\d+\)', stripped):
+                continue
+            
+            # Remove function name lines (e.g., 'func8:' or '    func8:') - only first occurrence
+            if not function_name_removed and re.match(r'^\s*\w+\s*:', stripped):
+                # Check if it's likely a function name (not a local label starting with .)
+                label_name = stripped.split(':')[0].strip()
+                if not label_name.startswith('.'):
+                    # This is a function name, skip it
+                    function_name_removed = True
+                    continue
+            
+            # Remove initial local labels like .LFB0: (only at the beginning, before first non-label line)
+            if skip_initial_labels:
+                if re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    continue
+                # Once we've hit a non-empty line that's not a .LFB label, stop skipping .LFB labels
+                if stripped and not re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    skip_initial_labels = False
+            
+            # Keep all other lines (including .cfi directives and everything else)
+            cleaned_lines.append(line)
+        
+        assembly = '\n'.join(cleaned_lines)
         
         # Map registers to their base register name for color grouping
         def get_base_register(reg_name):
@@ -435,32 +704,56 @@ class FunctionNode(QGraphicsRectItem):
         """Custom paint to draw rounded rectangles."""
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Draw top rounded rectangle (signature)
+        # Draw rectangle 1: signature
         path1 = QPainterPath()
         path1.addRoundedRect(self.signature_rect, 10, 10)
         painter.fillPath(path1, self.signature_brush)
         painter.strokePath(path1, self.pen())
         
-        # Draw bottom rounded rectangle (body)
+        # Draw rectangle 2: call graph registers
         path2 = QPainterPath()
-        path2.addRoundedRect(self.body_rect, 10, 10)
-        painter.fillPath(path2, self.body_brush)
+        path2.addRoundedRect(self.call_graph_registers_rect, 10, 10)
+        painter.fillPath(path2, self.call_graph_registers_brush)
         painter.strokePath(path2, self.pen())
         
-        # Draw separator line between signature and assembly
-        separator_y = self.signature_rect.height()
+        # Draw rectangle 3: function registers
+        path3 = QPainterPath()
+        path3.addRoundedRect(self.func_registers_rect, 10, 10)
+        painter.fillPath(path3, self.func_registers_brush)
+        painter.strokePath(path3, self.pen())
+        
+        # Draw rectangle 4: assembly body
+        path4 = QPainterPath()
+        path4.addRoundedRect(self.body_rect, 10, 10)
+        painter.fillPath(path4, self.body_brush)
+        painter.strokePath(path4, self.pen())
+        
+        # Draw separator lines between rectangles
         painter.setPen(QPen(QColor(50, 100, 200), 1))
-        painter.drawLine(QPointF(0, separator_y), 
-                        QPointF(self.rect().width(), separator_y))
+        separator_y1 = self.signature_rect.height()
+        painter.drawLine(QPointF(0, separator_y1), 
+                        QPointF(self.rect().width(), separator_y1))
+        
+        separator_y2 = separator_y1 + self.call_graph_registers_rect.height()
+        painter.drawLine(QPointF(0, separator_y2), 
+                        QPointF(self.rect().width(), separator_y2))
+        
+        separator_y3 = separator_y2 + self.func_registers_rect.height()
+        painter.drawLine(QPointF(0, separator_y3), 
+                        QPointF(self.rect().width(), separator_y3))
     
     def set_highlighted(self, highlighted):
         """Highlight or unhighlight the node."""
         if highlighted:
             self.signature_brush = QBrush(QColor(255, 150, 100))
+            self.call_graph_registers_brush = QBrush(QColor(255, 140, 90))
+            self.func_registers_brush = QBrush(QColor(255, 135, 85))
             self.body_brush = QBrush(QColor(255, 130, 80))
             self.setPen(QPen(QColor(255, 100, 50), 3))
         else:
             self.signature_brush = QBrush(QColor(80, 130, 235))
+            self.call_graph_registers_brush = QBrush(QColor(90, 140, 245))
+            self.func_registers_brush = QBrush(QColor(95, 145, 250))
             self.body_brush = QBrush(QColor(100, 150, 255))
             self.setPen(QPen(QColor(50, 100, 200), 2))
         self.update()
@@ -570,8 +863,9 @@ class CallGraphVisualizer(QMainWindow):
             signature = info.get('signature', f"{func_name}()")
             assembly = info.get('assembly', "Assembly unavailable")
             
-            
-            node = FunctionNode(func_name, signature, assembly, 0, 0)
+            # Pass call graph information to the node
+            node = FunctionNode(func_name, signature, assembly, 0, 0, 
+                              calls=self.calls, function_info=self.function_info)
             self.nodes[func_name] = node
             self.scene.addItem(node)
         
