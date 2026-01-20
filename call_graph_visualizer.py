@@ -1403,6 +1403,61 @@ class CallGraphVisualizer(QMainWindow):
         arrow2.setPen(pen)
         self.scene.addItem(arrow2)
         self.edge_items.append(arrow2)
+        
+        # Calculate and display shared registers at the center of the arrow
+        center_point = QPointF(
+            (start_point.x() + end_point.x()) / 2,
+            (start_point.y() + end_point.y()) / 2
+        )
+        
+        # Extract registers from both caller and callee
+        caller_registers = caller_node.extract_registers_from_assembly(caller_node.assembly)
+        callee_registers = callee_node.extract_registers_from_assembly(callee_node.assembly)
+        
+        # Find intersection (registers used by both)
+        shared_registers = caller_registers.intersection(callee_registers)
+        
+        # Format and display shared registers if any
+        if shared_registers:
+            shared_registers_text = caller_node.format_registers(shared_registers)
+            
+            # Create text item for shared registers
+            register_label = QGraphicsTextItem()
+            register_label.setDefaultTextColor(QColor(255, 255, 255))
+            font = QFont("Courier", 6)
+            font.setBold(False)
+            register_label.setFont(font)
+            register_label.setHtml(shared_registers_text)
+            
+            # Get text dimensions after setting HTML
+            # Use document size for more accurate measurement
+            text_doc = register_label.document()
+            text_doc.setTextWidth(-1)  # No width constraint for measurement
+            text_size = text_doc.size()
+            text_width = text_size.width()
+            text_height = text_size.height()
+            
+            # Position the label at the center of the arrow
+            # Adjust position to account for text size (center it)
+            label_x = center_point.x() - text_width / 2
+            label_y = center_point.y() - text_height / 2
+            register_label.setPos(label_x, label_y)
+            
+            # Add a semi-transparent background for better visibility
+            bg_rect = QGraphicsRectItem(
+                label_x - 3, label_y - 2,
+                text_width + 6, text_height + 4
+            )
+            bg_brush = QBrush(QColor(0, 0, 0, 200))  # Semi-transparent black
+            bg_rect.setBrush(bg_brush)
+            bg_rect.setPen(QPen(QColor(100, 100, 100, 150), 1))
+            bg_rect.setZValue(10)  # Ensure it's above the arrow
+            register_label.setZValue(11)  # Above the background
+            
+            self.scene.addItem(bg_rect)
+            self.scene.addItem(register_label)
+            self.edge_items.append(bg_rect)
+            self.edge_items.append(register_label)
     
     def draw_jump_arrows(self, node):
         """Draw arrows from jump instructions to their target labels within a function node."""
