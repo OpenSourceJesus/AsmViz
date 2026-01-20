@@ -408,11 +408,47 @@ class CallGraphVisualizer(QMainWindow):
             self.scene.removeItem(edge_item)
         self.edge_items = []
         
-        # Circular layout - account for rectangle size (250x180)
-        center_x, center_y = 600, 500
-        # Increase radius to accommodate larger rectangles
-        radius = min(350, max(200, n * 30))
+        # Calculate maximum node dimensions
+        max_width = 0
+        max_height = 0
+        for func_name in node_list:
+            node = self.nodes[func_name]
+            node_rect = node.rect()
+            max_width = max(max_width, node_rect.width())
+            max_height = max(max_height, node_rect.height())
         
+        # Calculate minimum spacing needed to prevent overlaps
+        # When nodes are placed in a circle, we need to ensure the arc distance
+        # between adjacent nodes is sufficient. The chord length between adjacent
+        # nodes should be at least the diagonal of the largest node plus padding.
+        max_diagonal = math.sqrt(max_width * max_width + max_height * max_height)
+        
+        # Add generous padding between nodes (minimum 80 pixels)
+        padding = 80
+        min_chord_length = max_diagonal + padding
+        
+        # Calculate radius based on chord length formula:
+        # chord_length = 2 * radius * sin(angle/2)
+        # For n nodes evenly spaced: angle = 2*pi/n
+        # So: chord_length = 2 * radius * sin(pi/n)
+        # Therefore: radius = chord_length / (2 * sin(pi/n))
+        if n > 1:
+            angle_per_node = 2 * math.pi / n
+            min_radius = min_chord_length / (2 * math.sin(angle_per_node / 2))
+        else:
+            min_radius = 200
+        
+        # Use a minimum radius and scale up if needed
+        center_x, center_y = 600, 500
+        radius = max(min_radius, 350)
+        
+        # For very few nodes, use a larger radius for better visual spacing
+        if n <= 3:
+            radius = max(radius, 450)
+        elif n <= 6:
+            radius = max(radius, 400)
+        
+        # Place nodes in a circle with proper spacing
         for i, func_name in enumerate(node_list):
             angle = 2 * math.pi * i / n
             node = self.nodes[func_name]
