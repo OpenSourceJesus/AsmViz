@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
                              QGraphicsTextItem, QGraphicsLineItem, QMessageBox)
 from PyQt5.QtCore import Qt, QRectF, QPointF
-from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent
+from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 import sys
 import math
 from collections import defaultdict
@@ -80,6 +80,26 @@ class PanGraphicsView(QGraphicsView):
         else:
             # Let the parent handle other buttons
             super().mouseReleaseEvent(event)
+    
+    def wheelEvent(self, event):
+        """Handle wheel events for zooming."""
+        # Determine zoom factor based on scroll direction
+        delta = event.angleDelta().y()
+        if delta > 0:
+            # Zoom in
+            zoom_factor = 1.15
+        else:
+            # Zoom out
+            zoom_factor = 1.0 / 1.15
+        
+        # Set transformation anchor to zoom towards the cursor position
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        
+        # Apply zoom
+        self.scale(zoom_factor, zoom_factor)
+        
+        # Reset transformation anchor to default
+        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
 
 
 class FunctionNode(QGraphicsRectItem):
