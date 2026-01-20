@@ -11,7 +11,9 @@ from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
 import sys
+import os
 import math
+from pathlib import Path
 from collections import defaultdict
 
 
@@ -958,7 +960,7 @@ class CallGraphVisualizer(QMainWindow):
         # Control panel
         control_layout = QHBoxLayout()
         
-        self.open_button = QPushButton("Open C File")
+        self.open_button = QPushButton("Open File/Directory")
         self.open_button.clicked.connect(self.open_file)
         control_layout.addWidget(self.open_button)
         
@@ -974,31 +976,164 @@ class CallGraphVisualizer(QMainWindow):
         self.view = PanGraphicsView(self.scene)
         main_layout.addWidget(self.view)
     
-    def load_file(self, filename):
-        """Load a C file and extract the call graph."""
+    def load_file(self, path):
+        """
+        Load a C file, directory, or list of files and extract the call graph.
+        
+        Args:
+            path: Path to a C file, directory, or list of file paths
+        """
         try:
             from call_graph_extractor import extract_call_graph
             from assembly_extractor import get_function_info
+            from file_finder import find_source_files, is_source_file_or_directory
             
-            self.current_filename = filename
-            self.functions, self.calls = extract_call_graph(filename)
+            # Determine if path is a file or directory
+            if isinstance(path, str):
+                path_obj = Path(path)
+            else:
+                path_obj = path
+            
+            c_filenames = []
+            assembly_files = []
+            
+            if path_obj.is_dir() or (isinstance(path, str) and os.path.isdir(path)):
+                # It's a directory - find all source files
+                c_files, asm_files, linker_scripts = find_source_files(path)
+                c_filenames = c_files
+                assembly_files = asm_files
+                self.current_filename = path
+                display_name = os.path.basename(os.path.abspath(path))
+            elif isinstance(path, list):
+                # It's a list of files
+                c_filenames = [f for f in path if f.endswith('.c')]
+                assembly_files = [f for f in path if f.endswith(('.s', '.S'))]
+                self.current_filename = path[0] if path else None
+                display_name = f"{len(path)} files"
+            else:
+                # Single file - check if it's a C file or assembly file
+                if path.endswith('.c'):
+                    c_filenames = [path]
+                elif path.endswith(('.s', '.S')):
+                    assembly_files = [path]
+                    c_filenames = []  # No C files, but we still need to parse the call graph from C
+                    # If it's just an assembly file, we can't extract call graph from C
+                    # We'll need to parse it differently
+                self.current_filename = path
+                display_name = os.path.basename(path)
+            
+            if not c_filenames and not assembly_files:
+                QMessageBox.warning(self, "No Files", 
+                                   "No C files or assembly files found. Please select a directory "
+                                   "containing .c, .s, or .S files, or a single C or assembly file.")
+                return
+            
+            # Extract call graph from C files
+            if c_filenames:
+                self.functions, self.calls = extract_call_graph(c_filenames)
+            else:
+                # No C files - can't extract call graph, but we can still parse assembly
+                self.functions = {}
+                self.calls = defaultdict(set)
+                QMessageBox.information(self, "Assembly Only", 
+                                       "Only assembly files found. Call graph extraction requires C files. "
+                                       "Assembly code will be parsed, but function calls won't be extracted.")
+            
+            # For assembly-only files, we need to extract function definitions from assembly
+            # and try to build a minimal call graph
+            if assembly_files and not c_filenames:
+                # Parse assembly files to find function definitions
+                from assembly_extractor import parse_assembly_file
+                for asm_file in assembly_files:
+                    asm_functions = parse_assembly_file(asm_file)
+                    # Add functions to our functions dict (they won't have AST nodes though)
+                    for func_name in asm_functions.keys():
+                        if func_name not in self.functions:
+                            # Create a dummy entry - we can't get signature/C code without C source
+                            self.functions[func_name] = None
             
             # Extract function signatures and assembly
-            self.function_info = get_function_info(filename, self.functions)
+            if c_filenames:
+                self.function_info = get_function_info(c_filenames, self.functions, assembly_files)
+            else:
+                # Assembly-only mode - create minimal function_info
+                self.function_info = {}
+                from assembly_extractor import parse_assembly_file
+                for asm_file in assembly_files:
+                    asm_functions = parse_assembly_file(asm_file)
+                    for func_name, asm_code in asm_functions.items():
+                        self.function_info[func_name] = {
+                            'signature': f"{func_name}()",
+                            'assembly': asm_code,
+                            'c_code': f"{func_name}() {{\n    // C code unavailable (assembly-only)\n}}"
+                        }
             
-            self.status_label.setText(f"Loaded: {filename} ({len(self.functions)} functions)")
+            # Update status
+            file_count = len(c_filenames) + len(assembly_files)
+            if file_count > 1:
+                status_text = f"Loaded: {display_name} ({file_count} files, {len(self.functions)} functions)"
+            else:
+                status_text = f"Loaded: {display_name} ({len(self.functions)} functions)"
+            self.status_label.setText(status_text)
             self.draw_graph()
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to parse file:\n{str(e)}")
+            import traceback
+            QMessageBox.critical(self, "Error", f"Failed to parse file/directory:\n{str(e)}\n\n{traceback.format_exc()}")
     
     def open_file(self):
-        """Open a C file dialog and load the selected file."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Open C File", "", "C Files (*.c);;All Files (*)"
-        )
+        """Open a file/directory dialog and load the selected file or directory."""
+        # Create a simple dialog with two buttons
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QLabel
         
-        if filename:
-            self.load_file(filename)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Open File or Directory")
+        dialog.setModal(True)
+        dialog.resize(300, 150)
+        
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+        
+        label = QLabel("What would you like to open?")
+        layout.addWidget(label)
+        
+        file_button = QPushButton("Select File")
+        dir_button = QPushButton("Select Directory")
+        cancel_button = QPushButton("Cancel")
+        
+        layout.addWidget(file_button)
+        layout.addWidget(dir_button)
+        layout.addWidget(cancel_button)
+        
+        selected_path = None
+        
+        def on_file_clicked():
+            nonlocal selected_path
+            filename, _ = QFileDialog.getOpenFileName(
+                dialog, "Open C/Assembly File", "", 
+                "C Files (*.c);;Assembly Files (*.s *.S);;All Files (*)"
+            )
+            if filename:
+                selected_path = filename
+                dialog.accept()
+        
+        def on_dir_clicked():
+            nonlocal selected_path
+            directory = QFileDialog.getExistingDirectory(
+                dialog, "Open Directory", "", QFileDialog.ShowDirsOnly
+            )
+            if directory:
+                selected_path = directory
+                dialog.accept()
+        
+        def on_cancel_clicked():
+            dialog.reject()
+        
+        file_button.clicked.connect(on_file_clicked)
+        dir_button.clicked.connect(on_dir_clicked)
+        cancel_button.clicked.connect(on_cancel_clicked)
+        
+        if dialog.exec_() == QDialog.Accepted and selected_path:
+            self.load_file(selected_path)
     
     def clear_graph(self):
         """Clear the current graph."""
@@ -1024,6 +1159,10 @@ class CallGraphVisualizer(QMainWindow):
         
         # Create nodes for all functions with signature and assembly
         for func_name in self.functions.keys():
+            # Skip functions that don't have function_info (e.g., assembly-only functions without proper entry)
+            if func_name not in self.function_info:
+                continue
+                
             info = self.function_info.get(func_name, {})
             signature = info.get('signature', f"{func_name}()")
             assembly = info.get('assembly', "Assembly unavailable")

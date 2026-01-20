@@ -3,10 +3,10 @@
 Main entry point for the Call Graph Visualizer application.
 
 Usage:
-    python main.py [filename.c]
+    python main.py [filename.c|directory]
     
-If a filename is provided, it will be automatically loaded and visualized.
-Otherwise, use the "Open C File" button to select a file.
+If a filename or directory is provided, it will be automatically loaded and visualized.
+Otherwise, use the "Open File/Directory" button to select a file or directory.
 """
 
 import sys
