@@ -17,15 +17,19 @@ from collections import defaultdict
 class FunctionNode(QGraphicsRectItem):
     """Represents a function node with signature and assembly body."""
     
-    def __init__(self, name, signature, assembly, x, y, width=250, min_height=60):
+    def __init__(self, name, signature, assembly, x, y, width=None, min_height=60):
+        # Calculate required width based on content
+        if width is None:
+            width = self.calculate_required_width(signature, assembly)
+        
         # Calculate required heights
         signature_height = self.calculate_text_height(signature, width - 10, 7, bold=True)
         formatted_asm = self.format_assembly(assembly)
         assembly_height = self.calculate_text_height(formatted_asm, width - 10, 7, bold=False)
         
-        # Set heights with padding
-        signature_rect_height = max(40, signature_height + 10)  # Min 40, or content + padding
-        assembly_rect_height = max(60, assembly_height + 10)  # Min 60, or content + padding
+        # Set heights with more generous padding to prevent cutoff
+        signature_rect_height = max(40, signature_height + 15)  # Min 40, or content + padding
+        assembly_rect_height = max(60, assembly_height + 20)  # Min 60, or content + more padding
         
         total_height = signature_rect_height + assembly_rect_height
         
@@ -71,58 +75,88 @@ class FunctionNode(QGraphicsRectItem):
         
         # Enable text wrapping and ensure it's visible
         self.assembly_text.setOpenExternalLinks(False)
+        
+        # After creating text items, check actual heights and adjust if needed
+        # Use the text document's size which is more accurate for wrapped text
+        assembly_doc = self.assembly_text.document()
+        assembly_doc.setTextWidth(width - 10)
+        actual_assembly_height = assembly_doc.size().height()
+        
+        # Calculate required height with padding
+        required_assembly_height = actual_assembly_height + 25  # Add generous padding
+        
+        # If the actual required height is greater than what we allocated, adjust the rectangle
+        if required_assembly_height > assembly_rect_height:
+            # Update assembly rectangle height
+            new_assembly_rect_height = required_assembly_height
+            self.body_rect = QRectF(0, signature_rect_height, width, new_assembly_rect_height)
+            
+            # Update total height and main rectangle
+            new_total_height = signature_rect_height + new_assembly_rect_height
+            self.setRect(0, 0, width, new_total_height)
+    
+    def calculate_required_width(self, signature, assembly):
+        """Calculate the minimum width needed to fit signature and assembly without wrapping."""
+        from PyQt5.QtGui import QFontMetrics
+        
+        # Use Courier font with size 7 to match the display font
+        font = QFont("Courier", 7)
+        font.setBold(True)
+        metrics_bold = QFontMetrics(font)
+        
+        font.setBold(False)
+        metrics_normal = QFontMetrics(font)
+        
+        max_width = 0
+        
+        # Check signature width (using bold metrics)
+        signature_width = metrics_bold.width(signature)
+        max_width = max(max_width, signature_width)
+        
+        # Check assembly width (using normal metrics)
+        if assembly and assembly.strip():
+            lines = assembly.split('\n')
+            for line in lines:
+                line_width = metrics_normal.width(line)
+                max_width = max(max_width, line_width)
+        else:
+            # "No assembly available" text
+            no_asm_width = metrics_normal.width("No assembly available")
+            max_width = max(max_width, no_asm_width)
+        
+        # Add padding (10 pixels on each side = 20 total, plus a bit more for safety)
+        return max_width + 30
     
     def calculate_text_height(self, text, text_width, font_size, bold=False):
-        """Calculate the height needed to display text."""
-        from PyQt5.QtGui import QFontMetrics
+        """Calculate the height needed to display text using QTextDocument for accuracy."""
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtCore import QSizeF
+        
+        # Use QTextDocument for accurate text measurement
+        doc = QTextDocument()
         font = QFont("Courier", font_size)
         if bold:
             font.setBold(True)
-        metrics = QFontMetrics(font)
-        line_height = metrics.height()
+        doc.setDefaultFont(font)
+        doc.setPlainText(text)
+        doc.setTextWidth(text_width)
         
-        # Count lines and calculate wrapped height
-        lines = text.split('\n')
-        total_height = 0
-        for line in lines:
-            if line.strip():
-                # Calculate how many wrapped lines this line will take
-                wrapped_rect = metrics.boundingRect(0, 0, int(text_width), 0, 
-                                                    Qt.TextWordWrap, line)
-                wrapped_height = wrapped_rect.height()
-                if wrapped_height == 0:
-                    wrapped_height = line_height
-                total_height += wrapped_height
-            else:
-                # Empty line still takes space
-                total_height += line_height
-        
-        return total_height
+        # Get the document size which accounts for wrapping
+        doc_size = doc.size()
+        return doc_size.height()
     
     def format_signature(self, signature):
         """Format signature text to fit in rectangle."""
-        # Truncate if too long
-        max_chars = 40
-        if len(signature) > max_chars:
-            return signature[:max_chars-3] + "..."
+        # No truncation needed - width is calculated dynamically
         return signature
     
     def format_assembly(self, assembly):
-        """Format assembly text - show all lines, truncate very long lines."""
+        """Format assembly text - show all lines without truncation."""
         if not assembly or assembly.strip() == "":
             return "No assembly available"
         
-        lines = assembly.split('\n')
-        # Keep all lines, just truncate very long individual lines
-        display_lines = []
-        for line in lines:
-            # Truncate very long lines for display
-            if len(line) > 70:
-                line = line[:67] + '...'
-            display_lines.append(line)
-        
-        result = '\n'.join(display_lines)
-        return result
+        # No truncation needed - width is calculated dynamically
+        return assembly
     
     def paint(self, painter, option, widget=None):
         """Custom paint to draw rounded rectangles."""
