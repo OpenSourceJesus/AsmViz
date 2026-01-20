@@ -8,10 +8,78 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
                              QGraphicsTextItem, QGraphicsLineItem, QMessageBox)
 from PyQt5.QtCore import Qt, QRectF, QPointF
-from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath
+from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent
 import sys
 import math
 from collections import defaultdict
+
+
+class PanGraphicsView(QGraphicsView):
+    """Custom QGraphicsView that supports panning with left, right, or middle mouse button."""
+    
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+        self.panning = False
+        self.pan_button_pressed = False
+        self.last_pan_point = QPointF()
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press events for panning."""
+        # Check if left, right, or middle mouse button is pressed
+        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            # Store the button press but don't start panning yet
+            # Panning will start when the mouse actually moves
+            self.pan_button_pressed = True
+            self.last_pan_point = event.pos()
+            # Don't call super() to prevent default behavior
+        else:
+            # Let the parent handle other buttons
+            super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events for panning."""
+        if self.pan_button_pressed:
+            # Start panning if we haven't already and mouse has moved
+            if not self.panning:
+                # Check if mouse has moved enough to start panning (threshold of 3 pixels)
+                delta = event.pos() - self.last_pan_point
+                if abs(delta.x()) > 3 or abs(delta.y()) > 3:
+                    self.panning = True
+                    self.setCursor(Qt.ClosedHandCursor)
+                    # Disable rubber band drag when panning
+                    self.setDragMode(QGraphicsView.NoDrag)
+            
+            if self.panning:
+                # Calculate the delta movement
+                delta = event.pos() - self.last_pan_point
+                self.last_pan_point = event.pos()
+                
+                # Scroll the view
+                h_bar = self.horizontalScrollBar()
+                v_bar = self.verticalScrollBar()
+                h_bar.setValue(h_bar.value() - delta.x())
+                v_bar.setValue(v_bar.value() - delta.y())
+            else:
+                # Mouse hasn't moved enough yet, let parent handle it
+                super().mouseMoveEvent(event)
+        else:
+            # Let the parent handle normal mouse moves
+            super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release events to stop panning."""
+        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            if self.panning:
+                # Restore rubber band drag mode
+                self.setDragMode(QGraphicsView.RubberBandDrag)
+            self.panning = False
+            self.pan_button_pressed = False
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            # Let the parent handle other buttons
+            super().mouseReleaseEvent(event)
 
 
 class FunctionNode(QGraphicsRectItem):
@@ -240,9 +308,7 @@ class CallGraphVisualizer(QMainWindow):
         
         # Graphics view
         self.scene = QGraphicsScene()
-        self.view = QGraphicsView(self.scene)
-        self.view.setRenderHint(QPainter.Antialiasing)
-        self.view.setDragMode(QGraphicsView.RubberBandDrag)
+        self.view = PanGraphicsView(self.scene)
         main_layout.addWidget(self.view)
     
     def load_file(self, filename):
