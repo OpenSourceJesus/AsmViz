@@ -6,7 +6,7 @@ Displays a call graph as an interactive graph visualization.
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QLabel,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
-                             QGraphicsTextItem, QGraphicsLineItem, QMessageBox)
+                             QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox)
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 import sys
@@ -957,6 +957,10 @@ class CallGraphVisualizer(QMainWindow):
         # Then draw edges
         for caller, callee in self.edges:
             self.draw_edge(caller, callee)
+        
+        # Draw jump arrows within each function node
+        for func_name, node in self.nodes.items():
+            self.draw_jump_arrows(node)
     
     def find_call_line_in_assembly(self, assembly, callee_name):
         """Find the line number (0-indexed) in processed assembly that contains call to callee_name.
@@ -1051,6 +1055,140 @@ class CallGraphVisualizer(QMainWindow):
             return i
         
         return 0
+    
+    def process_assembly_for_jumps(self, assembly):
+        """Process assembly the same way as color_code_assembly and return cleaned lines.
+        Returns tuple: (cleaned_lines, line_mapping) where line_mapping maps original line indices to cleaned indices."""
+        import re
+        
+        if not assembly:
+            return [], {}
+        
+        lines = assembly.split('\n')
+        cleaned_lines = []
+        line_mapping = {}  # Maps original line index to cleaned line index
+        skip_initial_labels = True
+        function_name_removed = False
+        
+        for orig_idx, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Remove file location annotations
+            if re.match(r'^@[^\s]+\.s\s+\(\d+-\d+\)', stripped):
+                continue
+            
+            # Remove function name lines (only first occurrence)
+            if not function_name_removed and re.match(r'^\s*\w+\s*:', stripped):
+                label_name = stripped.split(':')[0].strip()
+                if not label_name.startswith('.'):
+                    function_name_removed = True
+                    continue
+            
+            # Remove initial local labels like .LFB0:
+            if skip_initial_labels:
+                if re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    continue
+                if stripped and not re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    skip_initial_labels = False
+            
+            # Keep all other lines
+            cleaned_idx = len(cleaned_lines)
+            cleaned_lines.append(line)
+            line_mapping[orig_idx] = cleaned_idx
+        
+        return cleaned_lines, line_mapping
+    
+    def find_jumps_in_assembly(self, assembly):
+        """Find all jump instructions and their target labels.
+        Returns list of tuples: (jump_line_index, target_label) where jump_line_index is 0-indexed in cleaned assembly."""
+        import re
+        
+        if not assembly:
+            return []
+        
+        # Process assembly the same way as color_code_assembly
+        cleaned_lines, _ = self.process_assembly_for_jumps(assembly)
+        
+        # Jump instruction patterns (excluding call and ret)
+        jump_patterns = [
+            r'\bjmp\b',
+            r'\bje\b', r'\bjz\b',
+            r'\bjne\b', r'\bjnz\b',
+            r'\bja\b', r'\bjae\b',
+            r'\bjb\b', r'\bjbe\b',
+            r'\bjg\b', r'\bjge\b',
+            r'\bjl\b', r'\bjle\b',
+            r'\bjc\b', r'\bjnc\b',
+            r'\bjo\b', r'\bjno\b',
+            r'\bjs\b', r'\bjns\b',
+            r'\bjp\b', r'\bjnp\b',
+        ]
+        
+        jump_instructions = []
+        
+        for line_idx, line in enumerate(cleaned_lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            
+            # Check if this line contains a jump instruction
+            for pattern in jump_patterns:
+                if re.search(pattern, stripped, re.IGNORECASE):
+                    # Extract target label/address
+                    # Pattern: jmp label or jmp .L123 or jmp 0x1234
+                    # Try to find label after jump instruction
+                    jump_match = re.search(pattern, stripped, re.IGNORECASE)
+                    if jump_match:
+                        # Get text after the jump instruction
+                        after_jump = stripped[jump_match.end():].strip()
+                        if after_jump:
+                            # Extract potential label (could be .L123, label_name, or address)
+                            # Remove comments
+                            if '#' in after_jump or ';' in after_jump:
+                                comment_pos = min(
+                                    after_jump.find('#') if '#' in after_jump else len(after_jump),
+                                    after_jump.find(';') if ';' in after_jump else len(after_jump)
+                                )
+                                after_jump = after_jump[:comment_pos].strip()
+                            
+                            # Try to match label patterns
+                            # Label can be: .L123, label_name, or *label (indirect)
+                            # Also handle cases like: jmp .L123 or jmp label_name
+                            # Skip if it's a register or immediate value (hex/decimal numbers)
+                            # Pattern: not starting with $, %, 0x, or pure digits
+                            if not re.match(r'^[\$%]|^0x[0-9a-f]+|^\d+', after_jump, re.IGNORECASE):
+                                label_match = re.match(r'^\*?([\w.]+)', after_jump)
+                                if label_match:
+                                    target_label = label_match.group(1)
+                                    # Skip if it looks like a register (common x86 registers)
+                                    if target_label.lower() not in ['rax', 'rbx', 'rcx', 'rdx', 'rsi', 'rdi', 'rbp', 'rsp', 'rip',
+                                                                     'eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp', 'eip',
+                                                                     'ax', 'bx', 'cx', 'dx', 'si', 'di', 'bp', 'sp', 'ip']:
+                                        jump_instructions.append((line_idx, target_label))
+                                        break
+        
+        return jump_instructions
+    
+    def find_label_line(self, assembly, target_label):
+        """Find the line number (0-indexed) in processed assembly where target_label appears.
+        Returns None if label not found."""
+        import re
+        
+        if not assembly:
+            return None
+        
+        # Process assembly the same way as color_code_assembly
+        cleaned_lines, _ = self.process_assembly_for_jumps(assembly)
+        
+        # Look for label definition (label: or label followed by :)
+        # Pattern: label: or .L123: or label followed by whitespace and :
+        label_pattern = re.compile(r'^\s*' + re.escape(target_label) + r'\s*:', re.IGNORECASE)
+        
+        for line_idx, line in enumerate(cleaned_lines):
+            if label_pattern.match(line.strip()):
+                return line_idx
+        
+        return None
     
     def get_line_y_position_in_body(self, node, line_number):
         """Get the y-position (relative to node's top) of a specific line in the assembly body.
@@ -1265,6 +1403,119 @@ class CallGraphVisualizer(QMainWindow):
         arrow2.setPen(pen)
         self.scene.addItem(arrow2)
         self.edge_items.append(arrow2)
+    
+    def draw_jump_arrows(self, node):
+        """Draw arrows from jump instructions to their target labels within a function node."""
+        if not node.assembly:
+            return
+        
+        # Find all jumps in the assembly
+        jumps = self.find_jumps_in_assembly(node.assembly)
+        
+        for jump_line_idx, target_label in jumps:
+            # Find the target label line
+            target_line_idx = self.find_label_line(node.assembly, target_label)
+            
+            if target_line_idx is None:
+                # Target label not found, skip this jump
+                continue
+            
+            # Skip if jump and target are the same line (no arrow needed)
+            if jump_line_idx == target_line_idx:
+                continue
+            
+            # Get y-positions for both lines within the node
+            jump_y = self.get_line_y_position_in_body(node, jump_line_idx)
+            target_y = self.get_line_y_position_in_body(node, target_line_idx)
+            
+            # Calculate positions relative to node
+            node_rect = node.rect()
+            node_x = node.scenePos().x()
+            node_y = node.scenePos().y()
+            
+            # Draw arrow from right edge of node at jump line to right edge at target line
+            # Use a curved or angled arrow to make it clear
+            start_x = node_x + node_rect.width()
+            start_y = node_y + jump_y
+            end_x = node_x + node_rect.width()
+            end_y = node_y + target_y
+            
+            # Add a horizontal offset to make the arrow visible outside the node
+            arrow_offset = 30  # Pixels to extend beyond the node
+            
+            # Determine if this is a forward or backward jump
+            is_forward = target_line_idx > jump_line_idx
+            
+            # Create a curved path: start -> right offset -> end
+            # Use QPainterPath for a smooth curve
+            path = QPainterPath()
+            path.moveTo(start_x, start_y)
+            
+            # Create a bezier curve with control points
+            # For forward jumps, curve goes right then down
+            # For backward jumps, curve goes right then up
+            mid_x = start_x + arrow_offset
+            mid_y = (start_y + end_y) / 2
+            
+            # Use cubic bezier for smoother curves
+            # Control points: one near start, one near end
+            ctrl1_x = start_x + arrow_offset * 0.5
+            ctrl1_y = start_y
+            ctrl2_x = start_x + arrow_offset * 0.5
+            ctrl2_y = end_y
+            
+            path.cubicTo(ctrl1_x, ctrl1_y, ctrl2_x, ctrl2_y, end_x, end_y)
+            
+            # Create a path item
+            path_item = QGraphicsPathItem(path)
+            
+            # Use a different color/style for jump arrows to distinguish from call edges
+            pen = QPen(QColor(255, 200, 0), 1.5)  # Orange/yellow color
+            pen.setStyle(Qt.SolidLine)  # Solid line for jumps
+            path_item.setPen(pen)
+            self.scene.addItem(path_item)
+            self.edge_items.append(path_item)
+            
+            # Add arrowhead at the end
+            arrow_size = 8
+            # Calculate angle at end point (tangent to the curve)
+            # Use the direction from the last control point to the end point
+            dx = end_x - ctrl2_x
+            dy = end_y - ctrl2_y
+            if dx == 0 and dy == 0:
+                # Fallback: use vertical direction based on jump direction
+                angle = math.pi / 2 if is_forward else -math.pi / 2
+            else:
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    dx /= length
+                    dy /= length
+                angle = math.atan2(dy, dx)
+            
+            arrow_p1 = QPointF(end_x, end_y) - QPointF(
+                arrow_size * math.cos(angle - math.pi / 6),
+                arrow_size * math.sin(angle - math.pi / 6)
+            )
+            arrow_p2 = QPointF(end_x, end_y) - QPointF(
+                arrow_size * math.cos(angle + math.pi / 6),
+                arrow_size * math.sin(angle + math.pi / 6)
+            )
+            
+            arrow1 = QGraphicsLineItem(
+                end_x, end_y,
+                arrow_p1.x(), arrow_p1.y()
+            )
+            arrow1.setPen(pen)
+            self.scene.addItem(arrow1)
+            self.edge_items.append(arrow1)
+            
+            arrow2 = QGraphicsLineItem(
+                end_x, end_y,
+                arrow_p2.x(), arrow_p2.y()
+            )
+            arrow2.setPen(pen)
+            self.scene.addItem(arrow2)
+            self.edge_items.append(arrow2)
     
     def auto_layout(self):
         """Automatically layout nodes in a circular or force-directed manner."""
