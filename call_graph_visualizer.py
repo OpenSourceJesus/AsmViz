@@ -91,9 +91,9 @@ class FunctionNode(QGraphicsRectItem):
             width = self.calculate_required_width(signature, assembly)
         
         # Calculate required heights
-        signature_height = self.calculate_text_height(signature, width - 10, 7, bold=True)
+        signature_height = self.calculate_text_height(signature, width - 10, 7, bold=True, is_html=False)
         formatted_asm = self.format_assembly(assembly)
-        assembly_height = self.calculate_text_height(formatted_asm, width - 10, 7, bold=False)
+        assembly_height = self.calculate_text_height(formatted_asm, width - 10, 7, bold=False, is_html=True)
         
         # Set heights with more generous padding to prevent cutoff
         signature_rect_height = max(40, signature_height + 15)  # Min 40, or content + padding
@@ -133,13 +133,17 @@ class FunctionNode(QGraphicsRectItem):
         self.signature_text.setPos(5, 5)
         self.signature_text.setTextWidth(width - 10)
         
-        # Add assembly text
-        self.assembly_text = QGraphicsTextItem(formatted_asm, self)
+        # Add assembly text (using HTML for color-coding)
+        self.assembly_text = QGraphicsTextItem(self)
+        # Set default text color for non-register text
         self.assembly_text.setDefaultTextColor(QColor(255, 255, 255))
         font = QFont("Courier", 7)
         self.assembly_text.setFont(font)
         self.assembly_text.setPos(5, signature_rect_height + 5)
         self.assembly_text.setTextWidth(width - 10)
+        
+        # Set HTML content for color-coded assembly
+        self.assembly_text.setHtml(formatted_asm)
         
         # Enable text wrapping and ensure it's visible
         self.assembly_text.setOpenExternalLinks(False)
@@ -195,7 +199,7 @@ class FunctionNode(QGraphicsRectItem):
         # Add padding (10 pixels on each side = 20 total, plus a bit more for safety)
         return max_width + 30
     
-    def calculate_text_height(self, text, text_width, font_size, bold=False):
+    def calculate_text_height(self, text, text_width, font_size, bold=False, is_html=False):
         """Calculate the height needed to display text using QTextDocument for accuracy."""
         from PyQt5.QtGui import QTextDocument
         from PyQt5.QtCore import QSizeF
@@ -206,7 +210,13 @@ class FunctionNode(QGraphicsRectItem):
         if bold:
             font.setBold(True)
         doc.setDefaultFont(font)
-        doc.setPlainText(text)
+        
+        # Check if text contains HTML tags or use the is_html flag
+        if is_html or ('<' in text and '>' in text):
+            doc.setHtml(text)
+        else:
+            doc.setPlainText(text)
+        
         doc.setTextWidth(text_width)
         
         # Get the document size which accounts for wrapping
@@ -219,12 +229,207 @@ class FunctionNode(QGraphicsRectItem):
         return signature
     
     def format_assembly(self, assembly):
-        """Format assembly text - show all lines without truncation."""
+        """Format assembly text with color-coded instructions and registers."""
         if not assembly or assembly.strip() == "":
             return "No assembly available"
         
-        # No truncation needed - width is calculated dynamically
-        return assembly
+        # Color-code instructions and registers in the assembly text
+        return self.color_code_assembly(assembly)
+    
+    def color_code_assembly(self, assembly):
+        """Color-code registers in assembly text using HTML formatting.
+        Related registers (e.g., rax, eax, ax, al) use the same color."""
+        import re
+        
+        # Map registers to their base register name for color grouping
+        def get_base_register(reg_name):
+            """Get the base register name for color grouping."""
+            reg_lower = reg_name.lower()
+            
+            # General purpose registers - A register family
+            if reg_lower in ['rax', 'eax', 'ax', 'al', 'ah']:
+                return 'a'
+            # General purpose registers - B register family
+            elif reg_lower in ['rbx', 'ebx', 'bx', 'bl', 'bh']:
+                return 'b'
+            # General purpose registers - C register family
+            elif reg_lower in ['rcx', 'ecx', 'cx', 'cl', 'ch']:
+                return 'c'
+            # General purpose registers - D register family
+            elif reg_lower in ['rdx', 'edx', 'dx', 'dl', 'dh']:
+                return 'd'
+            # SI register family
+            elif reg_lower in ['rsi', 'esi', 'si', 'sil']:
+                return 'si'
+            # DI register family
+            elif reg_lower in ['rdi', 'edi', 'di', 'dil']:
+                return 'di'
+            # BP register family
+            elif reg_lower in ['rbp', 'ebp', 'bp', 'bpl']:
+                return 'bp'
+            # SP register family
+            elif reg_lower in ['rsp', 'esp', 'sp', 'spl']:
+                return 'sp'
+            # IP register family
+            elif reg_lower in ['rip', 'eip', 'ip']:
+                return 'ip'
+            # R8 register family
+            elif reg_lower in ['r8', 'r8b']:
+                return 'r8'
+            # R9 register family
+            elif reg_lower in ['r9', 'r9b']:
+                return 'r9'
+            # R10 register family
+            elif reg_lower in ['r10', 'r10b']:
+                return 'r10'
+            # R11 register family
+            elif reg_lower in ['r11', 'r11b']:
+                return 'r11'
+            # R12 register family
+            elif reg_lower in ['r12', 'r12b']:
+                return 'r12'
+            # R13 register family
+            elif reg_lower in ['r13', 'r13b']:
+                return 'r13'
+            # R14 register family
+            elif reg_lower in ['r14', 'r14b']:
+                return 'r14'
+            # R15 register family
+            elif reg_lower in ['r15', 'r15b']:
+                return 'r15'
+            # Segment registers
+            elif reg_lower in ['cs', 'ds', 'es', 'fs', 'gs', 'ss']:
+                return 'seg'
+            # SIMD registers (xmm, ymm, zmm, mm)
+            elif re.match(r'^(xmm|ymm|zmm|mm)', reg_lower):
+                return 'simd'
+            # Control/debug registers
+            elif re.match(r'^(cr|dr)', reg_lower):
+                return 'ctrl'
+            else:
+                return reg_lower
+        
+        # Color palette for different register families (bright colors for visibility on blue background)
+        register_colors = {
+            'a': '#FFFF00',      # Yellow for A registers (rax, eax, ax, al, ah)
+            'b': '#00FF00',      # Green for B registers (rbx, ebx, bx, bl, bh)
+            'c': '#00FFFF',      # Cyan for C registers (rcx, ecx, cx, cl, ch)
+            'd': '#FF00FF',      # Magenta for D registers (rdx, edx, dx, dl, dh)
+            'si': '#FF8000',     # Orange for SI registers (rsi, esi, si, sil)
+            'di': '#FF0080',     # Pink for DI registers (rdi, edi, di, dil)
+            'bp': '#80FF00',     # Lime for BP registers (rbp, ebp, bp, bpl)
+            'sp': '#0080FF',     # Light blue for SP registers (rsp, esp, sp, spl)
+            'ip': '#80FFFF',     # Light cyan for IP registers (rip, eip, ip)
+            'r8': '#FF8080',     # Light red for R8 registers
+            'r9': '#80FF80',     # Light green for R9 registers
+            'r10': '#8080FF',    # Light blue for R10 registers
+            'r11': '#FFFF80',    # Light yellow for R11 registers
+            'r12': '#FF80FF',    # Light magenta for R12 registers
+            'r13': '#80FFFF',    # Light cyan for R13 registers
+            'r14': '#FFC080',    # Peach for R14 registers
+            'r15': '#C0FF80',    # Light lime for R15 registers
+            'seg': '#FF4040',    # Red-orange for segment registers
+            'simd': '#40FF40',   # Bright green for SIMD registers
+            'ctrl': '#4040FF',   # Blue for control/debug registers
+        }
+        
+        # Define register patterns (x86-64 registers)
+        # General purpose 64-bit
+        reg64 = r'\b(r8|r9|r10|r11|r12|r13|r14|r15|rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|rip)\b'
+        # General purpose 32-bit
+        reg32 = r'\b(eax|ebx|ecx|edx|esi|edi|ebp|esp|eip)\b'
+        # General purpose 16-bit
+        reg16 = r'\b(ax|bx|cx|dx|si|di|bp|sp|ip)\b'
+        # General purpose 8-bit
+        reg8 = r'\b(al|bl|cl|dl|ah|bh|ch|dh|sil|dil|bpl|spl|r8b|r9b|r10b|r11b|r12b|r13b|r14b|r15b)\b'
+        # Segment registers
+        reg_seg = r'\b(cs|ds|es|fs|gs|ss)\b'
+        # MMX/SSE/AVX registers
+        reg_simd = r'\b(xmm[0-9]+|ymm[0-9]+|zmm[0-9]+|mm[0-7])\b'
+        # Control and debug registers
+        reg_ctrl = r'\b(cr[0-9]+|dr[0-9]+)\b'
+        
+        # Combine all patterns
+        all_regs = f'({reg64}|{reg32}|{reg16}|{reg8}|{reg_seg}|{reg_simd}|{reg_ctrl})'
+        
+        # Define instruction categories and colors
+        instruction_categories = {
+            # Data movement instructions
+            'mov': ['mov', 'movq', 'movl', 'movw', 'movb', 'movsx', 'movzx', 'movsb', 'movsw', 'movsd', 'movsq', 'movss', 'movapd', 'movaps', 'movdqa', 'movdqu'],
+            # Arithmetic instructions
+            'arith': ['add', 'sub', 'mul', 'div', 'imul', 'idiv', 'inc', 'dec', 'neg', 'adc', 'sbb', 'addq', 'addl', 'addw', 'addb', 'subq', 'subl', 'subw', 'subb'],
+            # Logical/bitwise instructions
+            'logic': ['and', 'or', 'xor', 'not', 'test', 'andq', 'andl', 'andw', 'andb', 'orq', 'orl', 'orw', 'orb', 'xorq', 'xorl', 'xorw', 'xorb'],
+            # Shift/rotate instructions
+            'shift': ['shl', 'shr', 'sal', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'shld', 'shrd', 'shlq', 'shlw', 'shlb', 'shrq', 'shrw', 'shrb'],
+            # Comparison instructions
+            'cmp': ['cmp', 'cmps', 'cmpsb', 'cmpsw', 'cmpsd', 'cmpsq', 'test', 'cmpq', 'cmpl', 'cmpw', 'cmpb'],
+            # Control flow instructions
+            'control': ['jmp', 'je', 'jz', 'jne', 'jnz', 'ja', 'jae', 'jb', 'jbe', 'jg', 'jge', 'jl', 'jle', 'jc', 'jnc', 'jo', 'jno', 'js', 'jns', 'jp', 'jnp', 'call', 'ret', 'retq', 'retl', 'retw', 'retb', 'iret', 'syscall', 'sysret'],
+            # Stack instructions
+            'stack': ['push', 'pop', 'pushq', 'pushl', 'pushw', 'pushb', 'popq', 'popl', 'popw', 'popb', 'pushf', 'popf', 'pusha', 'popa'],
+            # String instructions
+            'string': ['movs', 'movsb', 'movsw', 'movsd', 'movsq', 'lods', 'lodsb', 'lodsw', 'lodsd', 'lodsq', 'stos', 'stosb', 'stosw', 'stosd', 'stosq', 'scas', 'scasb', 'scasw', 'scasd', 'scasq', 'rep', 'repe', 'repz', 'repne', 'repnz'],
+            # Flag instructions
+            'flags': ['clc', 'stc', 'cmc', 'cld', 'std', 'cli', 'sti', 'lahf', 'sahf'],
+            # Other common instructions
+            'other': ['lea', 'nop', 'hlt', 'int', 'into', 'bound', 'ud2', 'cpuid', 'rdtsc', 'rdtscp', 'pause', 'lfence', 'mfence', 'sfence', 'lock', 'xchg', 'xadd', 'cmpxchg', 'cmpxchg8b', 'cmpxchg16b', 'bswap', 'bsf', 'bsr', 'popcnt', 'tzcnt', 'lzcnt'],
+        }
+        
+        # Color palette for instruction categories
+        instruction_colors = {
+            'mov': '#FF6B6B',      # Red for data movement
+            'arith': '#4ECDC4',    # Teal for arithmetic
+            'logic': '#95E1D3',    # Light teal for logical
+            'shift': '#F38181',    # Light red for shift/rotate
+            'cmp': '#AA96DA',      # Purple for comparison
+            'control': '#FCBAD3',  # Pink for control flow
+            'stack': '#FFD93D',     # Yellow for stack operations
+            'string': '#6BCB77',   # Green for string operations
+            'flags': '#FF9F43',    # Orange for flag operations
+            'other': '#A8E6CF',    # Light green for other instructions
+        }
+        
+        # Build instruction pattern (must be at start of line or after whitespace)
+        all_instructions = []
+        instruction_to_category = {}
+        for category, inst_list in instruction_categories.items():
+            for inst in inst_list:
+                all_instructions.append(inst)
+                instruction_to_category[inst.lower()] = category
+        
+        # Create pattern for instructions (word boundary, case insensitive)
+        inst_pattern = r'\b(' + '|'.join(re.escape(inst) for inst in all_instructions) + r')\b'
+        
+        # Escape HTML special characters first
+        html_assembly = assembly.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # First, color-code instructions (before registers to avoid conflicts)
+        def replace_instruction(match):
+            inst = match.group(0)
+            inst_lower = inst.lower()
+            category = instruction_to_category.get(inst_lower, 'other')
+            color = instruction_colors.get(category, '#FFFFFF')
+            return f'<span style="color: {color}; font-weight: bold;">{inst}</span>'
+        
+        # Apply instruction color-coding (case-insensitive)
+        html_assembly = re.sub(inst_pattern, replace_instruction, html_assembly, flags=re.IGNORECASE)
+        
+        # Then, replace registers with colored versions
+        def replace_register(match):
+            reg = match.group(0)
+            base_reg = get_base_register(reg)
+            # Get color for this register family, default to yellow if not found
+            color = register_colors.get(base_reg, '#FFFF00')
+            return f'<span style="color: {color}; font-weight: bold;">{reg}</span>'
+        
+        # Apply register color-coding (case-insensitive)
+        html_assembly = re.sub(all_regs, replace_register, html_assembly, flags=re.IGNORECASE)
+        
+        # Preserve line breaks by converting newlines to <br>
+        html_assembly = html_assembly.replace('\n', '<br>')
+        
+        return html_assembly
     
     def paint(self, painter, option, widget=None):
         """Custom paint to draw rounded rectangles."""
