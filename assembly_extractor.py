@@ -139,7 +139,11 @@ def extract_assembly_for_functions(c_filename, function_names):
                     if stripped.startswith('.ident') or (stripped.startswith('.section') and '.text' not in line):
                         break
                     
-                    # Add the line (including local labels like .LFB0:, .LFE0:, etc.)
+                    # Skip function end markers like .LFE0:
+                    if re.match(r'^\s*\.LFE\d+:', line):
+                        continue
+                    
+                    # Add the line (including local labels like .LFB0:, but not .LFE0:)
                     func_lines.append(line)
                     
                     # Limit to reasonable number of lines
@@ -162,7 +166,7 @@ def extract_assembly_for_functions(c_filename, function_names):
                             line = line[:77] + '...'
                         cleaned_lines.append(line)
                     # Limit total lines for display (but keep more than before)
-                    if len(cleaned_lines) >= 25:
+                    if len(cleaned_lines) >= 50:
                         break
                 
                 func_asm = '\n'.join(cleaned_lines)
