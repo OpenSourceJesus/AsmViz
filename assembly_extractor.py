@@ -195,33 +195,58 @@ def extract_assembly_for_functions(c_filename, function_names):
             pass
 
 
+def extract_function_c_code(func_def_node):
+    """
+    Extract C source code from a FuncDef AST node.
+    
+    Args:
+        func_def_node: pycparser c_ast.FuncDef node
+        
+    Returns:
+        str: C source code string
+    """
+    from pycparser import c_generator
+    
+    generator = c_generator.CGenerator()
+    
+    # Generate the full function definition (signature + body)
+    c_code = generator.visit(func_def_node)
+    
+    return c_code
+
+
 def get_function_info(c_filename, functions_dict):
     """
-    Get function signatures and assembly for all functions.
+    Get function signatures, assembly, and C code for all functions.
     
     Args:
         c_filename: Path to the C source file
         functions_dict: Dictionary of function_name -> FuncDef node
         
     Returns:
-        dict: function_name -> {'signature': str, 'assembly': str}
+        dict: function_name -> {'signature': str, 'assembly': str, 'c_code': str}
     """
     function_info = {}
     
-    # Extract signatures
+    # Extract signatures and C code
     for func_name, func_def in functions_dict.items():
         try:
             signature = extract_function_signature(func_def)
         except:
             signature = f"{func_name}()"
         
-        function_info[func_name] = {'signature': signature, 'assembly': None}
+        try:
+            c_code = extract_function_c_code(func_def)
+        except:
+            c_code = f"{signature} {{\n    // C code unavailable\n}}"
+        
+        function_info[func_name] = {'signature': signature, 'assembly': None, 'c_code': c_code}
     
     # Extract assembly for all functions at once
     function_names = list(functions_dict.keys())
     assemblies = extract_assembly_for_functions(c_filename, function_names)
     
-    # Combine signatures and assembly
+    # Combine signatures, assembly, and C code
     for func_name in function_names:
         if func_name in assemblies:
             function_info[func_name]['assembly'] = assemblies[func_name]

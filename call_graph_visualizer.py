@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox)
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
+from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
 import sys
 import math
 from collections import defaultdict
@@ -33,7 +34,9 @@ class PanGraphicsView(QGraphicsView):
             # Panning will start when the mouse actually moves
             self.pan_button_pressed = True
             self.last_pan_point = event.pos()
-            # Don't call super() to prevent default behavior
+            # Call super() to allow event to propagate to items for click detection
+            # We'll only start panning if the mouse moves
+            super().mousePressEvent(event)
         else:
             # Let the parent handle other buttons
             super().mousePressEvent(event)
@@ -71,12 +74,17 @@ class PanGraphicsView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         """Handle mouse release events to stop panning."""
         if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+            was_panning = self.panning
             if self.panning:
                 # Restore rubber band drag mode
                 self.setDragMode(QGraphicsView.RubberBandDrag)
             self.panning = False
             self.pan_button_pressed = False
             self.setCursor(Qt.ArrowCursor)
+            # If we were panning, don't propagate the release event to prevent item clicks
+            # If we weren't panning (just a click), propagate to allow item interaction
+            if not was_panning:
+                super().mouseReleaseEvent(event)
         else:
             # Let the parent handle other buttons
             super().mouseReleaseEvent(event)
@@ -150,10 +158,16 @@ class FunctionNode(QGraphicsRectItem):
         self.name = name
         self.signature = signature
         self.assembly = assembly
+        # Get C code from function_info if available
+        self.c_code = function_info.get(name, {}).get('c_code', '') if function_info else ''
+        # Toggle state: True = showing assembly, False = showing C code
+        self.showing_assembly = True
         self.setPos(x, y)
         self.setPen(QPen(QColor(50, 100, 200), 2))
         self.setFlag(QGraphicsRectItem.ItemIsMovable, False)
         self.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
+        # Enable mouse tracking for click detection
+        self.setAcceptHoverEvents(True)
         
         # Set rounded rectangle appearance
         self.setBrush(QBrush(QColor(100, 150, 255)))
@@ -489,6 +503,67 @@ class FunctionNode(QGraphicsRectItem):
         
         # Color-code instructions and registers in the assembly text
         return self.color_code_assembly(assembly)
+    
+    def format_c_code(self, c_code):
+        """Format C code for display as plain text, removing signature and braces."""
+        if not c_code or c_code.strip() == "":
+            return "No C code available"
+        
+        # Remove function signature and first curly brace
+        # Find the first opening brace
+        first_brace_idx = c_code.find('{')
+        if first_brace_idx != -1:
+            # Skip the brace and any whitespace after it
+            body_start = first_brace_idx + 1
+            # Find the last closing brace
+            last_brace_idx = c_code.rfind('}')
+            if last_brace_idx != -1 and last_brace_idx > first_brace_idx:
+                # Extract just the body content
+                body_code = c_code[body_start:last_brace_idx].strip()
+                return body_code
+        
+        # Fallback: return as-is if braces not found
+        return c_code
+    
+    def toggle_display(self):
+        """Toggle between showing assembly and C code."""
+        if not self.c_code:
+            # No C code available, can't toggle
+            return
+        
+        self.showing_assembly = not self.showing_assembly
+        
+        # Update the display
+        if self.showing_assembly:
+            # Show assembly (with HTML formatting)
+            formatted_asm = self.format_assembly(self.assembly)
+            self.assembly_text.setHtml(formatted_asm)
+        else:
+            # Show C code (plain text, no HTML)
+            formatted_c = self.format_c_code(self.c_code)
+            self.assembly_text.setPlainText(formatted_c)
+        
+        # Recalculate height and update rectangle
+        width = self.rect().width()
+        assembly_doc = self.assembly_text.document()
+        assembly_doc.setTextWidth(width - 10)
+        actual_height = assembly_doc.size().height()
+        required_height = actual_height + 25
+        
+        # Update body rectangle height
+        signature_rect_height = self.signature_rect.height()
+        call_graph_registers_rect_height = self.call_graph_registers_rect.height()
+        func_registers_rect_height = self.func_registers_rect.height()
+        
+        self.body_rect = QRectF(0, signature_rect_height + call_graph_registers_rect_height + func_registers_rect_height, 
+                                width, required_height)
+        
+        # Update total height
+        new_total_height = signature_rect_height + call_graph_registers_rect_height + func_registers_rect_height + required_height
+        self.setRect(0, 0, width, new_total_height)
+        
+        # Update the scene to reflect changes
+        self.update()
     
     def color_code_assembly(self, assembly):
         """Color-code registers in assembly text using HTML formatting.
@@ -832,6 +907,21 @@ class FunctionNode(QGraphicsRectItem):
             self.body_brush = QBrush(QColor(100, 150, 255))
             self.setPen(QPen(QColor(50, 100, 200), 2))
         self.update()
+    
+    def mousePressEvent(self, event):
+        """Handle mouse press events to toggle between assembly and C code."""
+        if event.button() == Qt.LeftButton:
+            # Check if click is within the body rectangle (where the code is displayed)
+            click_pos = event.pos()
+            if self.body_rect.contains(click_pos):
+                # Toggle display
+                self.toggle_display()
+                # Accept the event to prevent it from propagating
+                event.accept()
+                return
+        
+        # For other clicks or clicks outside body, let parent handle it
+        super().mousePressEvent(event)
 
 
 class CallGraphVisualizer(QMainWindow):
