@@ -959,60 +959,110 @@ class CallGraphVisualizer(QMainWindow):
             self.draw_edge(caller, callee)
     
     def find_call_line_in_assembly(self, assembly, callee_name):
-        """Find the line number (0-indexed) in assembly that contains call to callee_name."""
+        """Find the line number (0-indexed) in processed assembly that contains call to callee_name.
+        Uses the same processing as color_code_assembly to ensure line numbers match."""
         import re
         if not assembly:
             return None
         
+        # Process assembly the same way as color_code_assembly does
         lines = assembly.split('\n')
-        # Look for "call callee_name" pattern (case insensitive)
+        cleaned_lines = []
+        skip_initial_labels = True
+        function_name_removed = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Remove file location annotations
+            if re.match(r'^@[^\s]+\.s\s+\(\d+-\d+\)', stripped):
+                continue
+            
+            # Remove function name lines (only first occurrence)
+            if not function_name_removed and re.match(r'^\s*\w+\s*:', stripped):
+                label_name = stripped.split(':')[0].strip()
+                if not label_name.startswith('.'):
+                    function_name_removed = True
+                    continue
+            
+            # Remove initial local labels like .LFB0:
+            if skip_initial_labels:
+                if re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    continue
+                if stripped and not re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    skip_initial_labels = False
+            
+            # Keep all other lines
+            cleaned_lines.append(line)
+        
+        # Now search in the cleaned lines
         call_pattern = re.compile(r'\bcall\b.*\b' + re.escape(callee_name) + r'\b', re.IGNORECASE)
         
-        for i, line in enumerate(lines):
+        for i, line in enumerate(cleaned_lines):
             if call_pattern.search(line):
                 return i
         
         return None
     
     def find_entry_point_line(self, assembly):
-        """Find the line number (0-indexed) of the entry point (first actual instruction)."""
+        """Find the line number (0-indexed) of the entry point (first actual instruction).
+        Uses the same processing as color_code_assembly to ensure line numbers match."""
         import re
         
         if not assembly:
             return 0
         
+        # Process assembly the same way as color_code_assembly does
         lines = assembly.split('\n')
-        # Skip function label, .type directive, and initial local labels
-        for i, line in enumerate(lines):
+        cleaned_lines = []
+        skip_initial_labels = True
+        function_name_removed = False
+        
+        for line in lines:
             stripped = line.strip()
-            # Skip function name labels and directives
-            if re.match(r'^\s*\w+\s*:', stripped):  # Function label
+            
+            # Remove file location annotations
+            if re.match(r'^@[^\s]+\.s\s+\(\d+-\d+\)', stripped):
                 continue
-            if re.match(r'^\s*\.type\s+', stripped):  # .type directive
-                continue
-            if re.match(r'^\s*\.LFB\d+\s*:', stripped):  # Local function begin label
-                continue
+            
+            # Remove function name lines (only first occurrence)
+            if not function_name_removed and re.match(r'^\s*\w+\s*:', stripped):
+                label_name = stripped.split(':')[0].strip()
+                if not label_name.startswith('.'):
+                    function_name_removed = True
+                    continue
+            
+            # Remove initial local labels like .LFB0:
+            if skip_initial_labels:
+                if re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    continue
+                if stripped and not re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    skip_initial_labels = False
+            
+            # Keep all other lines
+            cleaned_lines.append(line)
+        
+        # Now find entry point in cleaned lines
+        for i, line in enumerate(cleaned_lines):
+            stripped = line.strip()
             if not stripped:  # Empty line
                 continue
-            # Found first non-empty, non-label line
+            # Found first non-empty line (this is the entry point after cleaning)
             return i
         
         return 0
     
     def get_line_y_position_in_body(self, node, line_number):
-        """Get the y-position (relative to node's top) of a specific line in the assembly body."""
+        """Get the y-position (relative to node's top) of a specific line in the assembly body.
+        line_number should be 0-indexed and correspond to the processed assembly (after cleaning)."""
         from PyQt5.QtGui import QFontMetrics
         
         # Get the assembly text item
         assembly_text = node.assembly_text
         assembly_doc = assembly_text.document()
         
-        # Get the original lines
-        lines = node.assembly.split('\n')
         if line_number < 0:
             line_number = 0
-        if line_number >= len(lines):
-            line_number = len(lines) - 1
         
         # Calculate approximate line height
         font = QFont("Courier", 7)
@@ -1033,11 +1083,16 @@ class CallGraphVisualizer(QMainWindow):
                 if lines_counted + lines_in_block > line_number:
                     # Target line is in this block
                     target_line_idx = line_number - lines_counted
-                    target_line = block_layout.lineAt(target_line_idx)
-                    if target_line.isValid():
-                        y_pos = block_layout.position().y() + target_line.naturalTextRect().y()
+                    if target_line_idx < lines_in_block:
+                        target_line = block_layout.lineAt(target_line_idx)
+                        if target_line.isValid():
+                            # Get the center y-position of the line
+                            line_rect = target_line.naturalTextRect()
+                            y_pos = block_layout.position().y() + line_rect.y() + line_rect.height() / 2
+                        else:
+                            y_pos = block_layout.position().y()
                     else:
-                        y_pos = block_layout.position().y()
+                        y_pos = block_layout.position().y() + block_layout.boundingRect().height()
                     break
                 
                 # Accumulate height
@@ -1054,7 +1109,7 @@ class CallGraphVisualizer(QMainWindow):
         
         # Fallback: if we didn't find it, estimate based on line number
         if lines_counted <= line_number or y_pos == 0:
-            y_pos = line_number * line_height
+            y_pos = line_number * line_height + line_height / 2  # Center of line
         
         # Add the base y-offset of the assembly text within the node
         # The assembly text starts at body_rect.y() + 5 (padding)
@@ -1093,93 +1148,84 @@ class CallGraphVisualizer(QMainWindow):
         caller_x = caller_rect.width() / 2
         callee_x = callee_rect.width() / 2
         
-        # Convert to scene coordinates
-        caller_point = caller_node.scenePos() + QPointF(caller_x, caller_body_y)
-        callee_point = callee_node.scenePos() + QPointF(callee_x, callee_body_y)
+        # Convert to scene coordinates - use actual line positions
+        caller_line_y = caller_node.scenePos().y() + caller_body_y
+        callee_line_y = callee_node.scenePos().y() + callee_body_y
         
         # Calculate direction vector
-        dx = callee_point.x() - caller_point.x()
-        dy = callee_point.y() - caller_point.y()
+        dx = callee_node.scenePos().x() - caller_node.scenePos().x()
+        dy = callee_line_y - caller_line_y
         length = math.sqrt(dx * dx + dy * dy)
         
         if length == 0:
             return
         
         # Normalize
-        dx /= length
-        dy /= length
+        dx_norm = dx / length
+        dy_norm = dy / length
         
-        # Calculate rectangle half dimensions
-        caller_half_w = caller_rect.width() / 2
-        callee_half_w = callee_rect.width() / 2
+        # Prevent vertical arrows by ensuring minimum horizontal component
+        # If the arrow would be too vertical, add horizontal offset
+        min_horizontal_ratio = 0.2  # Minimum 20% horizontal component
+        horizontal_offset = 0
         
-        # Find intersection point on caller rectangle edge
-        # Calculate where the line from caller_point intersects the caller rectangle edge
-        # Try left/right edges first (most common case)
-        if abs(dx) > 1e-6:
-            # Try right edge if going right, left edge if going left
-            if dx > 0:
-                t = (caller_rect.width() - caller_x) / dx
-            else:
-                t = (-caller_x) / dx
-            
-            # Check if this intersection is on top or bottom edge
-            intersect_y = caller_body_y + dy * t
-            if intersect_y >= 0 and intersect_y <= caller_rect.height():
-                start_point = caller_point + QPointF(dx * t, dy * t)
-            else:
-                # Intersect with top or bottom edge instead
-                if dy > 0:
-                    t = (caller_rect.height() - caller_body_y) / dy
-                elif dy < 0:
-                    t = (-caller_body_y) / dy
+        if abs(dx_norm) < min_horizontal_ratio:
+            # Calculate required horizontal offset to achieve minimum ratio
+            # We want: |dx_offset| / sqrt(dx_offset^2 + dy^2) >= min_horizontal_ratio
+            # Solving: dx_offset^2 >= min_horizontal_ratio^2 * (dx_offset^2 + dy^2)
+            # dx_offset^2 * (1 - min_horizontal_ratio^2) >= min_horizontal_ratio^2 * dy^2
+            # dx_offset >= min_horizontal_ratio * |dy| / sqrt(1 - min_horizontal_ratio^2)
+            min_horizontal_distance = min_horizontal_ratio * abs(dy) / math.sqrt(1 - min_horizontal_ratio * min_horizontal_ratio)
+            horizontal_offset = min_horizontal_distance - abs(dx)
+            if horizontal_offset > 0:
+                # Add offset in the direction we're going
+                if dx >= 0:
+                    horizontal_offset = horizontal_offset
                 else:
-                    t = 0
-                start_point = caller_point + QPointF(dx * t, dy * t)
-        else:
-            # Vertical line - intersect with top or bottom
-            if dy > 0:
-                t = (caller_rect.height() - caller_body_y) / dy
-            elif dy < 0:
-                t = (-caller_body_y) / dy
-            else:
-                t = 0
-            start_point = caller_point + QPointF(dx * t, dy * t)
+                    horizontal_offset = -horizontal_offset
         
-        # Find intersection point on callee rectangle edge
-        # Similar logic for callee
-        relative_callee_x = callee_x
-        relative_callee_y = callee_body_y
+        # Calculate start and end points on rectangle edges
+        # Start from the line y-position, exit from left or right edge
+        caller_line_x = caller_node.scenePos().x() + caller_x
         
-        if abs(dx) > 1e-6:
-            # Try right edge if coming from right, left edge if coming from left
-            if dx > 0:
-                t = (-relative_callee_x) / dx
-            else:
-                t = (callee_rect.width() - relative_callee_x) / dx
-            
-            # Check if this intersection is on top or bottom edge
-            intersect_y = relative_callee_y + dy * t
-            if intersect_y >= 0 and intersect_y <= callee_rect.height():
-                end_point = callee_point + QPointF(dx * t, dy * t)
-            else:
-                # Intersect with top or bottom edge instead
-                if dy > 0:
-                    t = (-relative_callee_y) / dy
-                elif dy < 0:
-                    t = (callee_rect.height() - relative_callee_y) / dy
-                else:
-                    t = 0
-                end_point = callee_point + QPointF(dx * t, dy * t)
+        # Determine which edge to exit from based on direction
+        if dx + horizontal_offset >= 0:
+            # Going right - exit from right edge
+            start_point = QPointF(caller_node.scenePos().x() + caller_rect.width(), caller_line_y)
         else:
-            # Vertical line - intersect with top or bottom
-            if dy > 0:
-                t = (-relative_callee_y) / dy
-            elif dy < 0:
-                t = (callee_rect.height() - relative_callee_y) / dy
-            else:
-                t = 0
-            end_point = callee_point + QPointF(dx * t, dy * t)
+            # Going left - exit from left edge
+            start_point = QPointF(caller_node.scenePos().x(), caller_line_y)
+        
+        # Clamp start point y to rectangle bounds
+        start_point.setY(max(caller_node.scenePos().y(), 
+                             min(caller_node.scenePos().y() + caller_rect.height(), start_point.y())))
+        
+        # End point: enter at left or right edge, at the line y-position
+        if dx + horizontal_offset >= 0:
+            # Coming from left - enter at left edge
+            end_point = QPointF(callee_node.scenePos().x(), callee_line_y)
+        else:
+            # Coming from right - enter at right edge
+            end_point = QPointF(callee_node.scenePos().x() + callee_rect.width(), callee_line_y)
+        
+        # Clamp end point y to rectangle bounds
+        end_point.setY(max(callee_node.scenePos().y(), 
+                          min(callee_node.scenePos().y() + callee_rect.height(), end_point.y())))
+        
+        # If we need horizontal offset, adjust the points
+        if horizontal_offset != 0:
+            # Move start point horizontally
+            start_point.setX(start_point.x() + horizontal_offset * 0.3)
+            # Move end point horizontally in opposite direction
+            end_point.setX(end_point.x() - horizontal_offset * 0.3)
+        
+        # Recalculate direction for arrowhead
+        dx = end_point.x() - start_point.x()
+        dy = end_point.y() - start_point.y()
+        length = math.sqrt(dx * dx + dy * dy)
+        if length > 0:
+            dx /= length
+            dy /= length
         
         # Create arrow line
         line = QGraphicsLineItem(
