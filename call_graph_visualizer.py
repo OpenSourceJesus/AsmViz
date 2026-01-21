@@ -6,7 +6,8 @@ Displays a call graph as an interactive graph visualization.
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QLabel,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
-                             QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox)
+                             QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox,
+                             QScrollArea, QTextEdit)
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
@@ -1204,6 +1205,8 @@ class CallGraphVisualizer(QMainWindow):
         self.edge_items = []  # List of QGraphicsItem for edges (lines and arrows)
         self.call_rectangles = []  # List of call display rectangles
         self.current_filename = None
+        self.global_variables = {}  # global_var_name -> set of function names that use it
+        self.global_var_usage = {}  # (global_var_name, func_name) -> {'r': bool, 'w': bool}
         self.init_ui()
         
         # Load file if provided
@@ -1219,9 +1222,35 @@ class CallGraphVisualizer(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
-        main_layout = QVBoxLayout()
+        # Main layout (horizontal: left panel + main view)
+        main_layout = QHBoxLayout()
         central_widget.setLayout(main_layout)
+        
+        # Left panel for global variables
+        left_panel = QWidget()
+        left_panel.setMaximumWidth(300)
+        left_panel.setMinimumWidth(250)
+        left_panel_layout = QVBoxLayout()
+        left_panel.setLayout(left_panel_layout)
+        
+        # Label for global variables panel
+        globals_label = QLabel("Global Variables")
+        globals_label.setFont(QFont("Arial", 10, QFont.Bold))
+        left_panel_layout.addWidget(globals_label)
+        
+        # Scrollable text area for global variables
+        self.globals_text = QTextEdit()
+        self.globals_text.setReadOnly(True)
+        self.globals_text.setFont(QFont("Courier", 9))
+        self.globals_text.setPlainText("No global variables found")
+        left_panel_layout.addWidget(self.globals_text)
+        
+        main_layout.addWidget(left_panel)
+        
+        # Right side: main content area
+        right_widget = QWidget()
+        right_layout = QVBoxLayout()
+        right_widget.setLayout(right_layout)
         
         # Control panel
         control_layout = QHBoxLayout()
@@ -1235,12 +1264,14 @@ class CallGraphVisualizer(QMainWindow):
         self.status_label = QLabel("No file loaded")
         control_layout.addWidget(self.status_label)
         
-        main_layout.addLayout(control_layout)
+        right_layout.addLayout(control_layout)
         
         # Graphics view
         self.scene = QGraphicsScene()
         self.view = PanGraphicsView(self.scene)
-        main_layout.addWidget(self.view)
+        right_layout.addWidget(self.view)
+        
+        main_layout.addWidget(right_widget)
     
     def load_file(self, path):
         """
@@ -1341,6 +1372,21 @@ class CallGraphVisualizer(QMainWindow):
                             'c_code': f"{func_name}() {{\n    // C code unavailable (assembly-only)\n}}"
                         }
             
+            # Extract global variables and detect their usage
+            if c_filenames:
+                self.global_variables = self.extract_global_variables(c_filenames)
+                if self.global_variables and self.function_info:
+                    self.global_var_usage = self.detect_global_usage_in_assembly(
+                        self.global_variables, self.function_info)
+                else:
+                    self.global_var_usage = {}
+            else:
+                self.global_variables = set()
+                self.global_var_usage = {}
+            
+            # Update global variables display
+            self.update_globals_display()
+            
             # Update status
             file_count = len(c_filenames) + len(assembly_files)
             if file_count > 1:
@@ -1420,7 +1466,250 @@ class CallGraphVisualizer(QMainWindow):
         self.calls_with_args = defaultdict(list)
         self.function_info = {}
         self.current_filename = None
+        self.global_variables = {}
+        self.global_var_usage = {}
+        self.globals_text.setPlainText("No global variables found")
         self.status_label.setText("No file loaded")
+    
+    def extract_global_variables(self, c_filenames):
+        """
+        Extract global variable names from C source files.
+        
+        Args:
+            c_filenames: List of C source file paths
+            
+        Returns:
+            set: Set of global variable names
+        """
+        from pycparser import parse_file, c_ast
+        from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
+        try:
+            from pycparser import __file__ as pycparser_file
+            pycparser_dir = os.path.dirname(pycparser_file)
+            fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+            FAKE_LIBC_AVAILABLE = os.path.isdir(fake_libc_include)
+        except:
+            FAKE_LIBC_AVAILABLE = False
+            fake_libc_include = None
+        
+        global_vars = set()
+        
+        # Use the same cpp_args as call_graph_extractor
+        cpp_args = []
+        cpp_args.extend([
+            '-U__attribute__',
+            '-D__attribute__(x)=',
+            '-D__alignof__(x)=sizeof(x)',
+            '-D__packed__=',
+            '-D__aligned__(x)=',
+            '-D__unused__=',
+            '-D__maybe_unused__=',
+            '-D__unused=',
+            '-D__maybe_unused=',
+        ])
+        
+        attr_fix_header = _create_attribute_fix_header()
+        if attr_fix_header:
+            cpp_args.extend(['-include', attr_fix_header])
+        
+        if FAKE_LIBC_AVAILABLE:
+            cpp_args.extend([
+                '-I' + fake_libc_include,
+                '-nostdinc',
+            ])
+        else:
+            fake_stddef = _create_fake_stddef_header()
+            if fake_stddef:
+                fake_stddef_dir = os.path.dirname(fake_stddef)
+                cpp_args.extend([
+                    '-I' + fake_stddef_dir,
+                    '-nostdinc',
+                ])
+        
+        cpp_args.extend([
+            '-D__volatile__=volatile',
+            '-D__restrict=',
+            '-D__extension__=',
+            '-D__asm__(x)=',
+            '-D__asm(x)=',
+            '-D__inline=',
+            '-D__inline__=',
+            '-D__const=const',
+            '-D__signed__=signed',
+        ])
+        
+        for filename in c_filenames:
+            try:
+                ast = parse_file(filename, use_cpp=True, cpp_args=cpp_args)
+                self._visit_for_globals(ast, global_vars)
+            except Exception as e:
+                print(f"Warning: Error parsing file {filename} for globals: {e}", file=sys.stderr)
+        
+        return global_vars
+    
+    def _visit_for_globals(self, node, global_vars, in_function=False):
+        """Recursively visit AST nodes to find global variable declarations."""
+        from pycparser import c_ast
+        
+        # Track if we're inside a function
+        if isinstance(node, c_ast.FuncDef):
+            in_function = True
+        
+        # Check for global variable declarations (Decl nodes at file scope)
+        if isinstance(node, c_ast.Decl) and not in_function:
+            if node.name:
+                # Check if it's a variable (not a function)
+                decl_type = node.type
+                if isinstance(decl_type, c_ast.TypeDecl):
+                    # It's a variable declaration
+                    global_vars.add(node.name)
+                elif isinstance(decl_type, c_ast.ArrayDecl):
+                    # It's an array declaration
+                    global_vars.add(node.name)
+                elif isinstance(decl_type, c_ast.PtrDecl):
+                    # It's a pointer declaration
+                    global_vars.add(node.name)
+        
+        # Recursively visit children
+        for child_name, child in node.children():
+            self._visit_for_globals(child, global_vars, in_function)
+    
+    def detect_global_usage_in_assembly(self, global_vars, function_info):
+        """
+        Detect reads and writes to global variables in assembly code.
+        
+        Args:
+            global_vars: Set of global variable names
+            function_info: dict of function_name -> {'signature': str, 'assembly': str}
+            
+        Returns:
+            dict: (global_var_name, func_name) -> {'r': bool, 'w': bool}
+        """
+        import re
+        
+        usage = {}
+        
+        for func_name, info in function_info.items():
+            assembly = info.get('assembly', '')
+            if not assembly:
+                continue
+            
+            # Find all references to global variables in assembly
+            for global_var in global_vars:
+                # Pattern to match global variable references in assembly
+                # Look for the variable name in memory references like:
+                # mov    DWORD PTR [rip+0x...], eax  (write)
+                # mov    eax, DWORD PTR [rip+0x...]  (read)
+                # mov    DWORD PTR global_var[rip], eax  (write)
+                # mov    eax, DWORD PTR global_var[rip]  (read)
+                # Also handle: global_var(%rip), global_var+offset, etc.
+                
+                # Check for direct references to the global variable name
+                # Assembly might have: global_var(%rip), global_var[rip], global_var+offset
+                var_pattern = re.escape(global_var)
+                
+                # Look for the variable name in the assembly
+                if re.search(rf'\b{var_pattern}\b', assembly, re.IGNORECASE):
+                    # Found a reference - now determine if it's a read or write
+                    reads = False
+                    writes = False
+                    
+                    # Split assembly into lines
+                    lines = assembly.split('\n')
+                    for line in lines:
+                        if re.search(rf'\b{var_pattern}\b', line, re.IGNORECASE):
+                            stripped = line.strip()
+                            
+                            # Skip comments and labels
+                            if stripped.startswith(';') or stripped.startswith('#'):
+                                continue
+                            if stripped.endswith(':'):
+                                continue
+                            
+                            # Check for write patterns (destination is memory)
+                            # Pattern: mov [mem], reg or mov [mem], imm
+                            # Match: mov DWORD PTR [global_var+...], reg
+                            # The key is that the memory reference comes first (destination)
+                            if re.search(rf'mov\s+.*\[.*{var_pattern}.*\],\s*\w+', stripped, re.IGNORECASE):
+                                writes = True
+                            # Check for other write instructions that modify memory
+                            elif re.search(rf'(add|sub|inc|dec|and|or|xor|not)\s+.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                writes = True
+                            
+                            # Check for read patterns (source is memory)
+                            # Pattern: mov reg, [mem] - register comes first, then memory
+                            if re.search(rf'mov\s+\w+,\s*.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                reads = True
+                            # Check for other read instructions
+                            elif re.search(rf'(cmp|test)\s+.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                reads = True
+                            # Check for lea (load effective address) - usually a read
+                            elif re.search(rf'lea\s+.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                reads = True
+                            # Check for push [mem] - read
+                            elif re.search(rf'push\s+.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                reads = True
+                            # Check for pop [mem] - write
+                            elif re.search(rf'pop\s+.*\[.*{var_pattern}', stripped, re.IGNORECASE):
+                                writes = True
+                    
+                    # If we found the variable but couldn't determine read/write, assume both
+                    if not reads and not writes:
+                        reads = True
+                        writes = True
+                    
+                    usage[(global_var, func_name)] = {'r': reads, 'w': writes}
+        
+        return usage
+    
+    def update_globals_display(self):
+        """Update the global variables display panel."""
+        if not self.global_variables:
+            self.globals_text.setPlainText("No global variables found")
+            return
+        
+        # Build display text
+        lines = []
+        
+        # Sort global variables alphabetically
+        sorted_globals = sorted(self.global_variables)
+        
+        for global_var in sorted_globals:
+            lines.append(f"{global_var}:")
+            
+            # Get all functions that use this global variable
+            # Store as list of tuples (func_name, usage) where usage is a tuple (r, w)
+            funcs_using_var = []
+            for (var_name, func_name), usage in self.global_var_usage.items():
+                if var_name == global_var:
+                    # Convert usage dict to tuple for sorting
+                    funcs_using_var.append((func_name, (usage.get('r', False), usage.get('w', False))))
+            
+            if not funcs_using_var:
+                lines.append("  (no functions use this variable)")
+            else:
+                # Sort functions alphabetically
+                sorted_funcs = sorted(funcs_using_var, key=lambda x: x[0])
+                
+                for func_name, (reads, writes) in sorted_funcs:
+                    # Build prefix: r-, w-, or rw-
+                    prefix_parts = []
+                    if reads:
+                        prefix_parts.append('r')
+                    if writes:
+                        prefix_parts.append('w')
+                    
+                    if prefix_parts:
+                        # Join without separator, then add dash: 'r' + 'w' = 'rw-'
+                        prefix = ''.join(prefix_parts) + '-'
+                    else:
+                        prefix = ''
+                    
+                    lines.append(f"  {prefix}{func_name}")
+            
+            lines.append("")  # Empty line between variables
+        
+        self.globals_text.setPlainText('\n'.join(lines))
     
     def draw_graph(self):
         """Draw the call graph."""
