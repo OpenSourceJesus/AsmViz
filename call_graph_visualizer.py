@@ -112,6 +112,91 @@ class PanGraphicsView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
 
 
+class FunctionCallRectangle(QGraphicsRectItem):
+    """Represents a function call with arguments in a rounded rectangle."""
+    
+    def __init__(self, caller_name, callee_name, args_list, x, y):
+        """
+        Args:
+            caller_name: Name of the function making the call
+            callee_name: Name of the function being called
+            args_list: List of argument strings (one per call site)
+            x, y: Position coordinates
+        """
+        # Calculate required dimensions
+        font = QFont("Courier", 7)
+        font.setBold(True)
+        from PyQt5.QtGui import QFontMetrics
+        metrics = QFontMetrics(font)
+        
+        # Calculate width needed
+        max_width = 0
+        header_text = f"{caller_name} → {callee_name}"
+        header_width = metrics.width(header_text)
+        max_width = max(max_width, header_width)
+        
+        # Calculate width for arguments
+        for args in args_list:
+            args_text = f"  args: {args}" if args else "  args: (none)"
+            args_width = metrics.width(args_text)
+            max_width = max(max_width, args_width)
+        
+        # Add padding
+        width = max_width + 20
+        min_width = 200
+        
+        # Calculate height
+        line_height = metrics.height()
+        header_height = line_height + 10
+        args_height = len(args_list) * (line_height + 5) + 10
+        total_height = header_height + args_height
+        
+        super().__init__(0, 0, max(width, min_width), total_height)
+        self.caller_name = caller_name
+        self.callee_name = callee_name
+        self.args_list = args_list
+        self.setPos(x, y)
+        self.setPen(QPen(QColor(150, 200, 100), 2))
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, False)
+        self.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        
+        # Set rounded rectangle appearance
+        self.setBrush(QBrush(QColor(120, 180, 80)))
+        
+        # Create text items
+        # Header: caller → callee
+        self.header_text = QGraphicsTextItem(header_text, self)
+        self.header_text.setDefaultTextColor(QColor(255, 255, 255))
+        header_font = QFont("Courier", 7)
+        header_font.setBold(True)
+        self.header_text.setFont(header_font)
+        self.header_text.setPos(5, 5)
+        self.header_text.setTextWidth(self.rect().width() - 10)
+        
+        # Arguments list
+        y_offset = header_height
+        for i, args in enumerate(args_list):
+            args_text = f"  args: {args}" if args else "  args: (none)"
+            args_item = QGraphicsTextItem(args_text, self)
+            args_item.setDefaultTextColor(QColor(255, 255, 255))
+            args_font = QFont("Courier", 6)
+            args_font.setBold(False)
+            args_item.setFont(args_font)
+            args_item.setPos(5, y_offset + i * (line_height + 5))
+            args_item.setTextWidth(self.rect().width() - 10)
+    
+    def paint(self, painter, option, widget=None):
+        """Custom paint to draw rounded rectangle."""
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw rounded rectangle
+        path = QPainterPath()
+        path.addRoundedRect(self.rect(), 10, 10)
+        painter.fillPath(path, self.brush())
+        painter.strokePath(path, self.pen())
+
+
 class FunctionNode(QGraphicsRectItem):
     """Represents a function node with signature and assembly body."""
     
@@ -1078,10 +1163,12 @@ class CallGraphVisualizer(QMainWindow):
         super().__init__()
         self.functions = {}
         self.calls = defaultdict(set)
+        self.calls_with_args = defaultdict(list)  # caller -> list of (callee, args_string) tuples
         self.function_info = {}  # function_name -> {'signature': str, 'assembly': str}
         self.nodes = {}  # function_name -> FunctionNode
         self.edges = []  # List of (caller, callee) tuples
         self.edge_items = []  # List of QGraphicsItem for edges (lines and arrows)
+        self.call_rectangles = []  # List of call display rectangles
         self.current_filename = None
         self.init_ui()
         
@@ -1175,11 +1262,18 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract call graph from C files
             if c_filenames:
-                self.functions, self.calls = extract_call_graph(c_filenames)
+                result = extract_call_graph(c_filenames)
+                if len(result) == 3:
+                    self.functions, self.calls, self.calls_with_args = result
+                else:
+                    # Backward compatibility
+                    self.functions, self.calls = result
+                    self.calls_with_args = defaultdict(list)
             else:
                 # No C files - can't extract call graph, but we can still parse assembly
                 self.functions = {}
                 self.calls = defaultdict(set)
+                self.calls_with_args = defaultdict(list)
                 QMessageBox.information(self, "Assembly Only", 
                                        "Only assembly files found. Call graph extraction requires C files. "
                                        "Assembly code will be parsed, but function calls won't be extracted.")
@@ -1286,8 +1380,10 @@ class CallGraphVisualizer(QMainWindow):
         self.nodes = {}
         self.edges = []
         self.edge_items = []
+        self.call_rectangles = []
         self.functions = {}
         self.calls = defaultdict(set)
+        self.calls_with_args = defaultdict(list)
         self.function_info = {}
         self.current_filename = None
         self.status_label.setText("No file loaded")
@@ -1298,6 +1394,7 @@ class CallGraphVisualizer(QMainWindow):
         self.nodes = {}
         self.edges = []
         self.edge_items = []
+        self.call_rectangles = []
         
         if not self.functions:
             return
@@ -1335,6 +1432,9 @@ class CallGraphVisualizer(QMainWindow):
         # Draw jump arrows within each function node
         for func_name, node in self.nodes.items():
             self.draw_jump_arrows(node)
+        
+        # Draw function call rectangles with arguments
+        self.draw_function_calls()
     
     def find_call_line_in_assembly(self, assembly, callee_name):
         """Find the line number (0-indexed) in processed assembly that contains call to callee_name.
@@ -2098,6 +2198,47 @@ class CallGraphVisualizer(QMainWindow):
         # Redraw edges with new positions
         for caller, callee in self.edges:
             self.draw_edge(caller, callee)
+    
+    def draw_function_calls(self):
+        """Draw rounded rectangles displaying function calls and their arguments."""
+        # Remove existing call rectangles first
+        for call_rect in self.call_rectangles:
+            if call_rect.scene():
+                self.scene.removeItem(call_rect)
+        self.call_rectangles = []
+        
+        if not self.calls_with_args:
+            return
+        
+        # For each function that makes calls, create call rectangles
+        for caller_name, call_list in self.calls_with_args.items():
+            if caller_name not in self.nodes:
+                continue
+            
+            caller_node = self.nodes[caller_name]
+            caller_rect = caller_node.rect()
+            caller_pos = caller_node.scenePos()
+            
+            # Position call rectangles to the right of the function node
+            x_offset = caller_rect.width() + 20  # Space between node and call rectangles
+            y_start = caller_pos.y() + 10  # Start slightly below top of node
+            
+            # Group calls by callee name for better organization
+            calls_by_callee = defaultdict(list)
+            for callee, args in call_list:
+                calls_by_callee[callee].append(args)
+            
+            # Create a rectangle for each unique callee with all its call sites
+            y_pos = y_start
+            for callee_name, args_list in calls_by_callee.items():
+                # Create call rectangle
+                call_rect = FunctionCallRectangle(caller_name, callee_name, args_list, 
+                                                  caller_pos.x() + x_offset, y_pos)
+                self.scene.addItem(call_rect)
+                self.call_rectangles.append(call_rect)
+                
+                # Update y position for next rectangle
+                y_pos += call_rect.rect().height() + 10  # 10 pixels spacing between rectangles
 
 
 def main():

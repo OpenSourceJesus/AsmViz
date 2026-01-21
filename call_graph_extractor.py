@@ -14,7 +14,8 @@ class CallGraphExtractor:
     
     def __init__(self):
         self.functions = {}  # function_name -> FunctionDef node
-        self.calls = defaultdict(set)  # caller -> set of callees
+        self.calls = defaultdict(set)  # caller -> set of callees (for backward compatibility)
+        self.calls_with_args = defaultdict(list)  # caller -> list of (callee, args_string) tuples
         self.defined_functions = set()  # All defined function names
         self.current_function = None  # Track current function context
         self.function_sources = {}  # function_name -> source file path
@@ -36,6 +37,7 @@ class CallGraphExtractor:
         # Reset state
         self.functions = {}
         self.calls = defaultdict(set)
+        self.calls_with_args = defaultdict(list)
         self.defined_functions = set()
         self.current_function = None
         self.function_sources = {}
@@ -51,7 +53,7 @@ class CallGraphExtractor:
             # Visit all nodes in the AST, passing source file for tracking
             self.visit(ast, source_file=filename)
         
-        return self.functions, self.calls
+        return self.functions, self.calls, self.calls_with_args
     
     def visit(self, node, source_file=None):
         """Recursively visit AST nodes."""
@@ -83,6 +85,9 @@ class CallGraphExtractor:
             callee_name = self.get_function_name(node)
             if callee_name and self.current_function:
                 self.calls[self.current_function].add(callee_name)
+                # Extract arguments as string
+                args_string = self.get_function_args_string(node)
+                self.calls_with_args[self.current_function].append((callee_name, args_string))
         
         # Recursively visit children
         for child_name, child in node.children():
@@ -98,6 +103,31 @@ class CallGraphExtractor:
                 if isinstance(node.name.field, c_ast.ID):
                     return node.name.field.name
         return None
+    
+    def get_function_args_string(self, node):
+        """Extract function call arguments as a formatted string."""
+        if not isinstance(node, c_ast.FuncCall):
+            return ""
+        
+        if not node.args:
+            return ""
+        
+        from pycparser import c_generator
+        generator = c_generator.CGenerator()
+        
+        # Generate string representation of each argument
+        args_list = []
+        for arg in node.args.exprs:
+            try:
+                arg_str = generator.visit(arg)
+                # Truncate very long arguments for display
+                if len(arg_str) > 50:
+                    arg_str = arg_str[:47] + "..."
+                args_list.append(arg_str)
+            except:
+                args_list.append("?")
+        
+        return ", ".join(args_list)
 
 
 def extract_call_graph(filenames):
@@ -108,7 +138,10 @@ def extract_call_graph(filenames):
         filenames: Path to a C source file, or list of paths to C source files
         
     Returns:
-        tuple: (functions dict, calls dict)
+        tuple: (functions dict, calls dict, calls_with_args dict)
+        - functions: function_name -> FunctionDef node
+        - calls: caller -> set of callees (for backward compatibility)
+        - calls_with_args: caller -> list of (callee, args_string) tuples
     """
     extractor = CallGraphExtractor()
     return extractor.extract(filenames)
