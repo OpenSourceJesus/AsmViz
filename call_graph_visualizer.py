@@ -190,6 +190,13 @@ class FunctionCallRectangle(QGraphicsRectItem):
         """Custom paint to draw rounded rectangle."""
         painter.setRenderHint(QPainter.Antialiasing)
         
+        # Draw drop shadow
+        shadow_path = QPainterPath()
+        shadow_offset = 28  # 7 times bigger than original 4
+        shadow_rect = self.rect().translated(shadow_offset, shadow_offset)
+        shadow_path.addRoundedRect(shadow_rect, 10, 10)
+        painter.fillPath(shadow_path, QBrush(QColor(0, 0, 0, 80)))  # Semi-transparent black shadow
+        
         # Draw rounded rectangle
         path = QPainterPath()
         path.addRoundedRect(self.rect(), 10, 10)
@@ -216,6 +223,9 @@ class FunctionNode(QGraphicsRectItem):
         call_graph_registers = self.extract_registers_from_call_graph(name, assembly)
         # Include the function's own registers in the call graph list
         call_graph_registers.update(func_registers)
+        
+        # Store call_graph_registers for later use (e.g., sorting in layout)
+        self.call_graph_registers = call_graph_registers
         
         # Format register displays with color-coding
         func_registers_text = self.format_registers(func_registers)
@@ -1085,6 +1095,30 @@ class FunctionNode(QGraphicsRectItem):
     def paint(self, painter, option, widget=None):
         """Custom paint to draw rounded rectangles."""
         painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw drop shadows for all rectangles
+        shadow_offset = 28  # 7 times bigger than original 4
+        shadow_brush = QBrush(QColor(0, 0, 0, 80))  # Semi-transparent black shadow
+        
+        # Shadow for rectangle 1: signature
+        shadow_path1 = QPainterPath()
+        shadow_path1.addRoundedRect(self.signature_rect.translated(shadow_offset, shadow_offset), 10, 10)
+        painter.fillPath(shadow_path1, shadow_brush)
+        
+        # Shadow for rectangle 2: call graph registers
+        shadow_path2 = QPainterPath()
+        shadow_path2.addRoundedRect(self.call_graph_registers_rect.translated(shadow_offset, shadow_offset), 10, 10)
+        painter.fillPath(shadow_path2, shadow_brush)
+        
+        # Shadow for rectangle 3: function registers
+        shadow_path3 = QPainterPath()
+        shadow_path3.addRoundedRect(self.func_registers_rect.translated(shadow_offset, shadow_offset), 10, 10)
+        painter.fillPath(shadow_path3, shadow_brush)
+        
+        # Shadow for rectangle 4: assembly body
+        shadow_path4 = QPainterPath()
+        shadow_path4.addRoundedRect(self.body_rect.translated(shadow_offset, shadow_offset), 10, 10)
+        painter.fillPath(shadow_path4, shadow_brush)
         
         # Draw rectangle 1: signature
         path1 = QPainterPath()
@@ -2168,28 +2202,44 @@ class CallGraphVisualizer(QMainWindow):
         for node, level in levels.items():
             nodes_by_level[level].append(node)
         
-        # Calculate spacing
-        horizontal_padding = max_width + 150  # Space between levels
-        vertical_padding = max_height + 80    # Space between nodes in same level
+        # Calculate spacing - make it more horizontal
+        horizontal_padding = max_width * 2.5 + 300  # Much larger horizontal spacing between levels
+        vertical_padding = max_height * 0.3 + 20     # Smaller vertical spacing within levels
         
-        # Calculate positions for each level
+        # Position nodes level by level (left to right shows call hierarchy)
         start_x = 50
         start_y = 50
+        
+        # Find the maximum total height across all levels to center-align levels
+        max_level_height = 0
+        for level in sorted(nodes_by_level.keys()):
+            level_nodes = nodes_by_level[level]
+            # Sort nodes within this level by register count (descending - more registers = higher)
+            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(getattr(self.nodes[node_name], 'call_graph_registers', set())), reverse=True)
+            
+            # Calculate total height needed for this level
+            total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
+            total_height += vertical_padding * (len(level_nodes_sorted) - 1)
+            max_level_height = max(max_level_height, total_height)
         
         # Position nodes level by level
         for level in sorted(nodes_by_level.keys()):
             level_nodes = nodes_by_level[level]
             x = start_x + level * horizontal_padding
             
-            # Calculate total height needed for this level
-            total_height = sum(self.nodes[node].rect().height() for node in level_nodes)
-            total_height += vertical_padding * (len(level_nodes) - 1)
+            # Sort nodes within this level by register count (descending - more registers = higher)
+            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(getattr(self.nodes[node_name], 'call_graph_registers', set())), reverse=True)
             
-            # Start y position to center this level vertically
+            # Calculate total height needed for this level
+            total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
+            total_height += vertical_padding * (len(level_nodes_sorted) - 1)
+            
+            # Center this level vertically (optional, or just start from top)
+            # For more horizontal layout, start all levels from the same Y
             current_y = start_y
             
             # Position each node in this level
-            for node_name in level_nodes:
+            for node_name in level_nodes_sorted:
                 node = self.nodes[node_name]
                 node_rect = node.rect()
                 node.setPos(x, current_y)
