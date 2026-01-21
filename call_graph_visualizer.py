@@ -847,6 +847,128 @@ class FunctionNode(QGraphicsRectItem):
         # Apply register color-coding (case-insensitive)
         html_assembly = re.sub(all_regs, replace_register, html_assembly, flags=re.IGNORECASE)
         
+        # Color memory operand brackets/parentheses black
+        # Pattern to match memory operands: [content] or (content)
+        # Note: content may contain HTML spans from register/instruction coloring
+        def color_memory_brackets(text):
+            """Color brackets and parentheses of memory operands black."""
+            result = text
+            
+            # Helper function to check if a position is inside an HTML tag
+            def is_inside_html_tag(text, pos):
+                """Check if position pos is inside an HTML tag."""
+                # Look backwards to find the most recent < or > before this position
+                # If we find a < and no > after it (or > comes before <), we're inside a tag
+                i = pos - 1
+                most_recent_lt = -1
+                most_recent_gt = -1
+                
+                while i >= 0:
+                    # Check for HTML entities (4 characters: &lt; or &gt;)
+                    if i >= 3:
+                        entity = text[i-3:i+1]
+                        if entity == '&gt;':
+                            if most_recent_gt == -1:
+                                most_recent_gt = i - 3
+                            i -= 4
+                            continue
+                        elif entity == '&lt;':
+                            if most_recent_lt == -1:
+                                most_recent_lt = i - 3
+                            i -= 4
+                            continue
+                    
+                    # Check for regular < and >
+                    if text[i] == '>':
+                        if most_recent_gt == -1:
+                            most_recent_gt = i
+                    elif text[i] == '<':
+                        if most_recent_lt == -1:
+                            most_recent_lt = i
+                    
+                    i -= 1
+                
+                # If we found a < and either no > or the < comes after the >
+                if most_recent_lt != -1:
+                    if most_recent_gt == -1 or most_recent_lt > most_recent_gt:
+                        return True
+                
+                return False
+            
+            # Process square brackets: find [ and matching ]
+            i = 0
+            while i < len(result):
+                if result[i] == '[' and not is_inside_html_tag(result, i):
+                    # Find matching ]
+                    depth = 1
+                    j = i + 1
+                    found_match = False
+                    
+                    while j < len(result) and depth > 0:
+                        if result[j] == '[' and not is_inside_html_tag(result, j):
+                            depth += 1
+                        elif result[j] == ']' and not is_inside_html_tag(result, j):
+                            depth -= 1
+                            if depth == 0:
+                                found_match = True
+                                break
+                        j += 1
+                    
+                    if found_match:
+                        # Get content between brackets
+                        content = result[i+1:j]
+                        # Check if content looks like a memory operand
+                        if re.search(r'[a-zA-Z0-9]', content) or '<span' in content:
+                            # Color the brackets black
+                            replacement = (f'<span style="color: #000000;">[</span>'
+                                          f'{content}'
+                                          f'<span style="color: #000000;">]</span>')
+                            result = result[:i] + replacement + result[j+1:]
+                            # Move past the replacement (skip the entire replacement)
+                            i += len(replacement)
+                            continue
+                
+                i += 1
+            
+            # Process parentheses: find ( and matching )
+            i = 0
+            while i < len(result):
+                if result[i] == '(' and not is_inside_html_tag(result, i):
+                    # Find matching )
+                    depth = 1
+                    j = i + 1
+                    found_match = False
+                    
+                    while j < len(result) and depth > 0:
+                        if result[j] == '(' and not is_inside_html_tag(result, j):
+                            depth += 1
+                        elif result[j] == ')' and not is_inside_html_tag(result, j):
+                            depth -= 1
+                            if depth == 0:
+                                found_match = True
+                                break
+                        j += 1
+                    
+                    if found_match:
+                        # Get content between parentheses
+                        content = result[i+1:j]
+                        # Check if content looks like a memory operand
+                        if re.search(r'[a-zA-Z0-9]', content) or '<span' in content:
+                            # Color the parentheses black
+                            replacement = (f'<span style="color: #000000;">(</span>'
+                                          f'{content}'
+                                          f'<span style="color: #000000;">)</span>')
+                            result = result[:i] + replacement + result[j+1:]
+                            # Move past the replacement (skip the entire replacement)
+                            i += len(replacement)
+                            continue
+                
+                i += 1
+            
+            return result
+        
+        html_assembly = color_memory_brackets(html_assembly)
+        
         # Preserve line breaks by converting newlines to <br>
         html_assembly = html_assembly.replace('\n', '<br>')
         
