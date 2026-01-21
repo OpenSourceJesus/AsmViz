@@ -1207,6 +1207,7 @@ class CallGraphVisualizer(QMainWindow):
         self.current_filename = None
         self.global_variables = {}  # global_var_name -> type string
         self.global_var_usage = {}  # (global_var_name, func_name) -> {'r': bool, 'w': bool}
+        self.structs = {}  # struct_name -> {'members': [(member_name, member_type), ...]}
         self.init_ui()
         
         # Load file if provided
@@ -1226,14 +1227,14 @@ class CallGraphVisualizer(QMainWindow):
         main_layout = QHBoxLayout()
         central_widget.setLayout(main_layout)
         
-        # Left panel for global variables
+        # Left panel for global variables and structs
         left_panel = QWidget()
         left_panel.setMaximumWidth(300)
         left_panel.setMinimumWidth(250)
         left_panel_layout = QVBoxLayout()
         left_panel.setLayout(left_panel_layout)
         
-        # Label for global variables panel
+        # Global Variables Section
         globals_label = QLabel("Global Variables")
         globals_label.setFont(QFont("Arial", 10, QFont.Bold))
         left_panel_layout.addWidget(globals_label)
@@ -1244,6 +1245,18 @@ class CallGraphVisualizer(QMainWindow):
         self.globals_text.setFont(QFont("Courier", 9))
         self.globals_text.setPlainText("No global variables found")
         left_panel_layout.addWidget(self.globals_text)
+        
+        # Structs Section
+        structs_label = QLabel("Structs")
+        structs_label.setFont(QFont("Arial", 10, QFont.Bold))
+        left_panel_layout.addWidget(structs_label)
+        
+        # Scrollable text area for structs
+        self.structs_text = QTextEdit()
+        self.structs_text.setReadOnly(True)
+        self.structs_text.setFont(QFont("Courier", 9))
+        self.structs_text.setPlainText("No structs found")
+        left_panel_layout.addWidget(self.structs_text)
         
         main_layout.addWidget(left_panel)
         
@@ -1380,12 +1393,17 @@ class CallGraphVisualizer(QMainWindow):
                         self.global_variables, self.function_info)
                 else:
                     self.global_var_usage = {}
+                # Extract structs
+                self.structs = self.extract_structs(c_filenames)
             else:
                 self.global_variables = {}
                 self.global_var_usage = {}
+                self.structs = {}
             
             # Update global variables display
             self.update_globals_display()
+            # Update structs display
+            self.update_structs_display()
             
             # Update status
             file_count = len(c_filenames) + len(assembly_files)
@@ -1468,7 +1486,9 @@ class CallGraphVisualizer(QMainWindow):
         self.current_filename = None
         self.global_variables = {}
         self.global_var_usage = {}
+        self.structs = {}
         self.globals_text.setPlainText("No global variables found")
+        self.structs_text.setPlainText("No structs found")
         self.status_label.setText("No file loaded")
     
     def extract_global_variables(self, c_filenames):
@@ -1776,6 +1796,216 @@ class CallGraphVisualizer(QMainWindow):
             lines.append("")  # Empty line between variables
         
         self.globals_text.setPlainText('\n'.join(lines))
+    
+    def extract_structs(self, c_filenames):
+        """
+        Extract struct definitions and their members from C source files.
+        
+        Args:
+            c_filenames: List of C source file paths
+            
+        Returns:
+            dict: Mapping of struct names to {'members': [(member_name, member_type), ...]}
+        """
+        from pycparser import parse_file, c_ast
+        from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
+        try:
+            from pycparser import __file__ as pycparser_file
+            pycparser_dir = os.path.dirname(pycparser_file)
+            fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+            FAKE_LIBC_AVAILABLE = os.path.isdir(fake_libc_include)
+        except:
+            FAKE_LIBC_AVAILABLE = False
+            fake_libc_include = None
+        
+        structs = {}
+        
+        # Use the same cpp_args as call_graph_extractor
+        cpp_args = []
+        cpp_args.extend([
+            '-U__attribute__',
+            '-D__attribute__(x)=',
+            '-D__alignof__(x)=sizeof(x)',
+            '-D__packed__=',
+            '-D__aligned__(x)=',
+            '-D__unused__=',
+            '-D__maybe_unused__=',
+            '-D__unused=',
+            '-D__maybe_unused=',
+        ])
+        
+        attr_fix_header = _create_attribute_fix_header()
+        if attr_fix_header:
+            cpp_args.extend(['-include', attr_fix_header])
+        
+        if FAKE_LIBC_AVAILABLE:
+            cpp_args.extend([
+                '-I' + fake_libc_include,
+                '-nostdinc',
+            ])
+        else:
+            fake_stddef = _create_fake_stddef_header()
+            if fake_stddef:
+                fake_stddef_dir = os.path.dirname(fake_stddef)
+                cpp_args.extend([
+                    '-I' + fake_stddef_dir,
+                    '-nostdinc',
+                ])
+        
+        cpp_args.extend([
+            '-D__volatile__=volatile',
+            '-D__restrict=',
+            '-D__extension__=',
+            '-D__asm__(x)=',
+            '-D__asm(x)=',
+            '-D__inline=',
+            '-D__inline__=',
+            '-D__const=const',
+            '-D__signed__=signed',
+        ])
+        
+        for filename in c_filenames:
+            try:
+                ast = parse_file(filename, use_cpp=True, cpp_args=cpp_args)
+                self._visit_for_structs(ast, structs)
+            except Exception as e:
+                print(f"Warning: Error parsing file {filename} for structs: {e}", file=sys.stderr)
+        
+        return structs
+    
+    def _visit_for_structs(self, node, structs):
+        """Recursively visit AST nodes to find struct definitions."""
+        from pycparser import c_ast, c_generator
+        import re
+        
+        # Helper function to extract members from a Struct node
+        def extract_members_from_struct(struct_node):
+            """Extract member list from a Struct node."""
+            members = []
+            if hasattr(struct_node, 'decls') and struct_node.decls:
+                generator = c_generator.CGenerator()
+                for decl in struct_node.decls:
+                    if isinstance(decl, c_ast.Decl) and decl.name:
+                        # Extract member name and type
+                        try:
+                            # Generate the full declaration
+                            full_decl = generator.visit(decl)
+                            member_name = decl.name
+                            
+                            # Extract type by removing the member name
+                            type_str = full_decl
+                            if type_str.endswith(member_name):
+                                type_str = type_str[:-len(member_name)].strip()
+                            elif member_name in type_str:
+                                pattern = re.escape(member_name) + r'(?=\s*[\[\(]|$|\s)'
+                                type_str = re.sub(pattern, '', type_str).strip()
+                            
+                            # Clean up extra spaces
+                            type_str = ' '.join(type_str.split())
+                            
+                            # Remove array sizes
+                            type_str = re.sub(r'\[\s*[\w\d]+\s*\]', '[]', type_str)
+                            type_str = ' '.join(type_str.split())
+                            
+                            if type_str:
+                                members.append((member_name, type_str))
+                        except Exception as e:
+                            print(f"Warning: Could not extract member {decl.name if hasattr(decl, 'name') else 'unknown'}: {e}", file=sys.stderr)
+            return members
+        
+        # Check for Decl nodes with Struct type (struct definitions at file scope)
+        # Example: struct Point { int x; int y; };
+        if isinstance(node, c_ast.Decl):
+            if hasattr(node, 'type') and isinstance(node.type, c_ast.Struct):
+                struct_node = node.type
+                struct_name = None
+                
+                # Get struct name from the Struct node itself
+                if hasattr(struct_node, 'name') and struct_node.name:
+                    struct_name = struct_node.name
+                
+                # Extract members
+                members = extract_members_from_struct(struct_node)
+                
+                # Store struct if it has a name or members
+                if struct_name:
+                    structs[struct_name] = {'members': members}
+                elif members:
+                    # Anonymous struct - use a generated name
+                    struct_name = f"<anonymous_{len(structs)}>"
+                    structs[struct_name] = {'members': members}
+        
+        # Check for direct Struct nodes (might be nested)
+        if isinstance(node, c_ast.Struct):
+            struct_name = None
+            members = []
+            
+            # Get struct name if it's a named struct
+            if hasattr(node, 'name') and node.name:
+                struct_name = node.name
+            
+            # Get struct members
+            members = extract_members_from_struct(node)
+            
+            # Store struct if it has a name or members (and we haven't already stored it)
+            if struct_name and struct_name not in structs:
+                structs[struct_name] = {'members': members}
+            elif members and not struct_name:
+                # Anonymous struct - use a generated name
+                struct_name = f"<anonymous_{len(structs)}>"
+                structs[struct_name] = {'members': members}
+        
+        # Also check for typedef struct definitions
+        if isinstance(node, c_ast.Typedef):
+            if hasattr(node, 'type') and isinstance(node.type, c_ast.Struct):
+                struct_node = node.type
+                struct_name = node.name if hasattr(node, 'name') and node.name else None
+                
+                # Extract members
+                members = extract_members_from_struct(struct_node)
+                
+                # Also check if the struct itself has a name (for typedef struct Name { ... } Alias;)
+                if hasattr(struct_node, 'name') and struct_node.name:
+                    # The struct has a name, store it with that name
+                    if struct_node.name not in structs:
+                        structs[struct_node.name] = {'members': members}
+                
+                # Store with typedef name if different
+                if struct_name and struct_name not in structs:
+                    structs[struct_name] = {'members': members}
+        
+        # Recursively visit children
+        for child_name, child in node.children():
+            self._visit_for_structs(child, structs)
+    
+    def update_structs_display(self):
+        """Update the structs display panel."""
+        if not self.structs:
+            self.structs_text.setPlainText("No structs found")
+            return
+        
+        # Build display text
+        lines = []
+        
+        # Sort structs alphabetically
+        sorted_structs = sorted(self.structs.items())
+        
+        for struct_name, struct_info in sorted_structs:
+            # Display struct name (without 'struct' prefix)
+            lines.append(f"{struct_name}:")
+            
+            # Display members
+            members = struct_info.get('members', [])
+            if not members:
+                lines.append("  (no members)")
+            else:
+                for member_name, member_type in members:
+                    # Format: member_name (type) - no semicolon
+                    lines.append(f"  {member_name} ({member_type})")
+            
+            lines.append("")  # Empty line between structs
+        
+        self.structs_text.setPlainText('\n'.join(lines))
     
     def draw_graph(self):
         """Draw the call graph."""
