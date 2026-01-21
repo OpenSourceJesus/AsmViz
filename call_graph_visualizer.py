@@ -1205,7 +1205,7 @@ class CallGraphVisualizer(QMainWindow):
         self.edge_items = []  # List of QGraphicsItem for edges (lines and arrows)
         self.call_rectangles = []  # List of call display rectangles
         self.current_filename = None
-        self.global_variables = {}  # global_var_name -> set of function names that use it
+        self.global_variables = {}  # global_var_name -> type string
         self.global_var_usage = {}  # (global_var_name, func_name) -> {'r': bool, 'w': bool}
         self.init_ui()
         
@@ -1381,7 +1381,7 @@ class CallGraphVisualizer(QMainWindow):
                 else:
                     self.global_var_usage = {}
             else:
-                self.global_variables = set()
+                self.global_variables = {}
                 self.global_var_usage = {}
             
             # Update global variables display
@@ -1473,13 +1473,13 @@ class CallGraphVisualizer(QMainWindow):
     
     def extract_global_variables(self, c_filenames):
         """
-        Extract global variable names from C source files.
+        Extract global variable names and types from C source files.
         
         Args:
             c_filenames: List of C source file paths
             
         Returns:
-            set: Set of global variable names
+            dict: Mapping of global variable names to their type strings
         """
         from pycparser import parse_file, c_ast
         from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
@@ -1492,7 +1492,7 @@ class CallGraphVisualizer(QMainWindow):
             FAKE_LIBC_AVAILABLE = False
             fake_libc_include = None
         
-        global_vars = set()
+        global_vars = {}
         
         # Use the same cpp_args as call_graph_extractor
         cpp_args = []
@@ -1549,7 +1549,8 @@ class CallGraphVisualizer(QMainWindow):
     
     def _visit_for_globals(self, node, global_vars, in_function=False):
         """Recursively visit AST nodes to find global variable declarations."""
-        from pycparser import c_ast
+        from pycparser import c_ast, c_generator
+        import re
         
         # Track if we're inside a function
         if isinstance(node, c_ast.FuncDef):
@@ -1560,15 +1561,79 @@ class CallGraphVisualizer(QMainWindow):
             if node.name:
                 # Check if it's a variable (not a function)
                 decl_type = node.type
+                is_variable = False
+                
                 if isinstance(decl_type, c_ast.TypeDecl):
                     # It's a variable declaration
-                    global_vars.add(node.name)
+                    is_variable = True
                 elif isinstance(decl_type, c_ast.ArrayDecl):
                     # It's an array declaration
-                    global_vars.add(node.name)
+                    is_variable = True
                 elif isinstance(decl_type, c_ast.PtrDecl):
                     # It's a pointer declaration
-                    global_vars.add(node.name)
+                    is_variable = True
+                
+                if is_variable:
+                    # Extract the type string using c_generator
+                    try:
+                        generator = c_generator.CGenerator()
+                        # Generate the full declaration string (e.g., "int var_name" or "int *var_name")
+                        full_decl = generator.visit(node)
+                        # Remove the variable name to get just the type
+                        # The declaration format is typically "type var_name" or "type *var_name" etc.
+                        var_name = node.name
+                        type_str = full_decl
+                        
+                        # Remove the variable name from the declaration
+                        # Handle various patterns:
+                        # - "int var" -> "int"
+                        # - "int *var" -> "int *"
+                        # - "int var[10]" -> "int [10]"
+                        # - "struct foo var" -> "struct foo"
+                        
+                        # First, try exact match replacement
+                        if type_str.endswith(var_name):
+                            type_str = type_str[:-len(var_name)].strip()
+                        elif var_name in type_str:
+                            # More complex: find and remove the variable name
+                            # Look for patterns like "var_name", "var_name[", "var_name)", etc.
+                            # Pattern to match the variable name followed by optional brackets/parentheses
+                            pattern = re.escape(var_name) + r'(?=\s*[\[\(]|$|\s)'
+                            type_str = re.sub(pattern, '', type_str).strip()
+                        
+                        # Clean up extra spaces
+                        type_str = ' '.join(type_str.split())
+                        
+                        # If we ended up with an empty string, try a different approach
+                        if not type_str:
+                            # Fallback: generate type from decl_type directly
+                            type_str = generator.visit(decl_type)
+                            if var_name in type_str:
+                                type_str = type_str.replace(var_name, '').strip()
+                                type_str = ' '.join(type_str.split())
+                        
+                        # Remove initial values (e.g., "int = 0" -> "int", "int = 5" -> "int")
+                        # Pattern: = followed by any value (number, string, expression, etc.)
+                        # Remove assignment: = followed by any characters until semicolon, comma, or end
+                        # Be careful not to remove = in other contexts (like == in expressions)
+                        # We only want to remove = that appears after the type (which should be at the end)
+                        type_str = re.sub(r'\s*=\s*[^;,\[\]]+(?=[;,]|$)', '', type_str)
+                        
+                        # Remove array sizes (e.g., "int[10]" -> "int[]", "int[SIZE]" -> "int[]")
+                        # Replace [number] or [identifier] with [] for array dimensions
+                        # This handles both numeric sizes and constant names
+                        # We match brackets that appear after the type (array dimensions)
+                        # Pattern: [ followed by optional whitespace, then digits or identifier, then ]
+                        type_str = re.sub(r'\[\s*[\w\d]+\s*\]', '[]', type_str)
+                        
+                        # Clean up extra spaces again after modifications
+                        type_str = ' '.join(type_str.split())
+                        
+                        global_vars[node.name] = type_str if type_str else "unknown"
+                    except Exception as e:
+                        # Fallback: just use "unknown" if type extraction fails
+                        print(f"Warning: Could not extract type for {node.name}: {e}", file=sys.stderr)
+                        global_vars[node.name] = "unknown"
         
         # Recursively visit children
         for child_name, child in node.children():
@@ -1579,7 +1644,7 @@ class CallGraphVisualizer(QMainWindow):
         Detect reads and writes to global variables in assembly code.
         
         Args:
-            global_vars: Set of global variable names
+            global_vars: dict mapping global variable names to their types
             function_info: dict of function_name -> {'signature': str, 'assembly': str}
             
         Returns:
@@ -1595,7 +1660,7 @@ class CallGraphVisualizer(QMainWindow):
                 continue
             
             # Find all references to global variables in assembly
-            for global_var in global_vars:
+            for global_var in global_vars.keys():
                 # Pattern to match global variable references in assembly
                 # Look for the variable name in memory references like:
                 # mov    DWORD PTR [rip+0x...], eax  (write)
@@ -1672,10 +1737,11 @@ class CallGraphVisualizer(QMainWindow):
         lines = []
         
         # Sort global variables alphabetically
-        sorted_globals = sorted(self.global_variables)
+        sorted_globals = sorted(self.global_variables.items())
         
-        for global_var in sorted_globals:
-            lines.append(f"{global_var}:")
+        for global_var, var_type in sorted_globals:
+            # Display variable name with type in parentheses
+            lines.append(f"{global_var} ({var_type}):")
             
             # Get all functions that use this global variable
             # Store as list of tuples (func_name, usage) where usage is a tuple (r, w)
