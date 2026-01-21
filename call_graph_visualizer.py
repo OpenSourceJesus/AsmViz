@@ -1700,12 +1700,12 @@ class CallGraphVisualizer(QMainWindow):
     
     def get_line_y_position_in_body(self, node, line_number):
         """Get the y-position (relative to node's top) of a specific line in the assembly body.
-        line_number should be 0-indexed and correspond to the processed assembly (after cleaning)."""
-        from PyQt5.QtGui import QFontMetrics
+        line_number should be 0-indexed and correspond to the processed assembly (after cleaning).
         
-        # Get the assembly text item
-        assembly_text = node.assembly_text
-        assembly_doc = assembly_text.document()
+        This function processes the raw assembly the same way as find_call_line_in_assembly
+        to ensure line numbers match correctly."""
+        from PyQt5.QtGui import QFontMetrics
+        import re
         
         if line_number < 0:
             line_number = 0
@@ -1715,47 +1715,109 @@ class CallGraphVisualizer(QMainWindow):
         metrics = QFontMetrics(font)
         line_height = metrics.height()
         
-        # Try to get accurate position by iterating through document blocks
-        # Each <br> tag in HTML creates a new line in the layout
-        block = assembly_doc.firstBlock()
-        y_pos = 0
-        lines_counted = 0
+        # Process the raw assembly the same way as find_call_line_in_assembly does
+        # This ensures we're counting lines consistently
+        assembly = node.assembly
+        if not assembly:
+            # Fallback if no assembly
+            body_y_offset = node.signature_rect.height() + node.call_graph_registers_rect.height() + node.func_registers_rect.height()
+            return body_y_offset + 5 + line_number * line_height + line_height / 2
         
-        while block.isValid() and lines_counted <= line_number:
+        # Process assembly the same way as color_code_assembly and find_call_line_in_assembly
+        lines = assembly.split('\n')
+        cleaned_lines = []
+        skip_initial_labels = True
+        function_name_removed = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Remove file location annotations
+            if re.match(r'^@[^\s]+\.s\s+\(\d+-\d+\)', stripped):
+                continue
+            
+            # Remove function name lines (only first occurrence)
+            if not function_name_removed and re.match(r'^\s*\w+\s*:', stripped):
+                label_name = stripped.split(':')[0].strip()
+                if not label_name.startswith('.'):
+                    function_name_removed = True
+                    continue
+            
+            # Remove initial local labels like .LFB0:
+            if skip_initial_labels:
+                if re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    continue
+                if stripped and not re.match(r'^\s*\.LFB\d+\s*:', stripped):
+                    skip_initial_labels = False
+            
+            # Keep all other lines
+            cleaned_lines.append(line)
+        
+        # Now we have the cleaned lines that match what's displayed
+        # The line_number corresponds to an index in cleaned_lines
+        # Verify that line_number is within bounds
+        if line_number >= len(cleaned_lines):
+            line_number = len(cleaned_lines) - 1
+            if line_number < 0:
+                line_number = 0
+        
+        # Get the document to try to get accurate line positions
+        assembly_text = node.assembly_text
+        assembly_doc = assembly_text.document()
+        
+        # Ensure the document is laid out
+        assembly_doc.setTextWidth(assembly_text.textWidth())
+        
+        # Try to get accurate position from the document by counting lines
+        # The HTML document should have the same number of lines as cleaned_lines
+        # (since we convert \n to <br>)
+        block = assembly_doc.firstBlock()
+        doc_lines_counted = 0
+        y_pos = 0
+        found_exact = False
+        
+        while block.isValid() and doc_lines_counted <= line_number:
             block_layout = block.layout()
             if block_layout:
                 lines_in_block = block_layout.lineCount()
                 
-                if lines_counted + lines_in_block > line_number:
+                if doc_lines_counted <= line_number < doc_lines_counted + lines_in_block:
                     # Target line is in this block
-                    target_line_idx = line_number - lines_counted
-                    if target_line_idx < lines_in_block:
+                    target_line_idx = line_number - doc_lines_counted
+                    if target_line_idx >= 0 and target_line_idx < lines_in_block:
                         target_line = block_layout.lineAt(target_line_idx)
                         if target_line.isValid():
-                            # Get the center y-position of the line
+                            # Get the center y-position of the line from the document
                             line_rect = target_line.naturalTextRect()
                             y_pos = block_layout.position().y() + line_rect.y() + line_rect.height() / 2
-                        else:
-                            y_pos = block_layout.position().y()
-                    else:
+                            found_exact = True
+                            break
+                    # If line index is out of range, use end of block
+                    if not found_exact:
                         y_pos = block_layout.position().y() + block_layout.boundingRect().height()
-                    break
+                        found_exact = True
+                        break
                 
-                # Accumulate height
-                y_pos = block_layout.position().y() + block_layout.boundingRect().height()
-                lines_counted += lines_in_block
+                # Accumulate position for blocks before the target
+                if not found_exact:
+                    y_pos = block_layout.position().y() + block_layout.boundingRect().height()
+                    doc_lines_counted += lines_in_block
             else:
-                # No layout, estimate
-                y_pos = lines_counted * line_height
-                lines_counted += 1
-                if lines_counted > line_number:
+                # Block with no layout - count as one line
+                if doc_lines_counted == line_number:
+                    y_pos = doc_lines_counted * line_height + line_height / 2
+                    found_exact = True
+                    break
+                y_pos = (doc_lines_counted + 1) * line_height
+                doc_lines_counted += 1
+                if doc_lines_counted > line_number:
                     break
             
             block = block.next()
         
-        # Fallback: if we didn't find it, estimate based on line number
-        if lines_counted <= line_number or y_pos == 0:
-            y_pos = line_number * line_height + line_height / 2  # Center of line
+        # Fallback: if we didn't find exact position, use simple calculation
+        if not found_exact:
+            y_pos = line_number * line_height + line_height / 2
         
         # Add the base y-offset of the assembly text within the node
         # The assembly text starts at body_rect.y() + 5 (padding)

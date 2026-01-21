@@ -283,10 +283,7 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
                     # Add the line (including local labels like .LFB0:, but not .LFE0:)
                     func_lines.append(line)
                     
-                    # Limit to reasonable number of lines
-                    if len(func_lines) > 60:
-                        func_lines.append('...')
-                        break
+                    # No max line count limit - display all lines
             
             # Join and clean up
             if func_lines:
@@ -302,13 +299,9 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
                         if len(line) > 80:
                             line = line[:77] + '...'
                         cleaned_lines.append(line)
-                    # Limit total lines for display (but keep more than before)
-                    if len(cleaned_lines) >= 50:
-                        break
+                    # No max line count limit - display all lines
                 
                 func_asm = '\n'.join(cleaned_lines)
-                if len(asm_lines) > len(cleaned_lines):
-                    func_asm += '\n...'
             else:
                 func_asm = f"; {func_name}: (no body captured)"
             
