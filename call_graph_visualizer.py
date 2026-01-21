@@ -116,9 +116,9 @@ class FunctionNode(QGraphicsRectItem):
     """Represents a function node with signature and assembly body."""
     
     def __init__(self, name, signature, assembly, x, y, width=None, min_height=60, calls=None, function_info=None):
-        # Calculate required width based on content
+        # Calculate required width based on content (including function name)
         if width is None:
-            width = self.calculate_required_width(signature, assembly)
+            width = self.calculate_required_width(name, signature, assembly)
         
         # Extract registers
         self.calls = calls if calls is not None else {}
@@ -137,6 +137,8 @@ class FunctionNode(QGraphicsRectItem):
         call_graph_registers_text = self.format_registers(call_graph_registers)
         
         # Calculate required heights
+        # Calculate function name height (larger font, size 10)
+        function_name_height = self.calculate_text_height(name, width - 10, 10, bold=True, is_html=False)
         signature_height = self.calculate_text_height(signature, width - 10, 7, bold=True, is_html=False)
         
         # Calculate label heights
@@ -149,7 +151,9 @@ class FunctionNode(QGraphicsRectItem):
         assembly_height = self.calculate_text_height(formatted_asm, width - 10, 7, bold=False, is_html=True)
         
         # Set heights with more generous padding to prevent cutoff
-        signature_rect_height = max(40, signature_height + 15)  # Min 40, or content + padding
+        # Signature rect now needs to accommodate both function name and signature
+        # Add some spacing between function name and signature (5 pixels)
+        signature_rect_height = max(50, function_name_height + signature_height + 20)  # Min 50, or content + padding
         call_graph_registers_rect_height = max(50, label_height + call_graph_registers_height + 20)  # Min 50, or label + content + padding
         func_registers_rect_height = max(50, label_height2 + func_registers_height + 20)  # Min 50, or label + content + padding
         assembly_rect_height = max(60, assembly_height + 20)  # Min 60, or content + more padding
@@ -197,13 +201,23 @@ class FunctionNode(QGraphicsRectItem):
         self.body_rect = QRectF(0, y_offset, width, assembly_rect_height)
         self.body_brush = QBrush(QColor(100, 150, 255))
         
-        # Add signature text
+        # Add function name text (bold and bigger, above signature)
+        self.function_name_text = QGraphicsTextItem(name, self)
+        self.function_name_text.setDefaultTextColor(QColor(255, 255, 255))
+        font_name = QFont("Courier", 14)
+        font_name.setBold(True)
+        self.function_name_text.setFont(font_name)
+        self.function_name_text.setPos(5, 5)
+        self.function_name_text.setTextWidth(width - 10)
+        
+        # Add signature text (positioned below function name)
+        # Use the pre-calculated function_name_height with 5 pixels spacing
         self.signature_text = QGraphicsTextItem(self.format_signature(signature), self)
         self.signature_text.setDefaultTextColor(QColor(255, 255, 255))
         font = QFont("Courier", 7)
         font.setBold(True)
         self.signature_text.setFont(font)
-        self.signature_text.setPos(5, 5)
+        self.signature_text.setPos(5, 5 + function_name_height + 5)  # 5 pixels spacing after function name
         self.signature_text.setTextWidth(width - 10)
         
         # Add call graph registers text with label
@@ -437,7 +451,7 @@ class FunctionNode(QGraphicsRectItem):
         # Join with commas and spaces
         return ', '.join(formatted_regs)
     
-    def calculate_required_width(self, signature, assembly):
+    def calculate_required_width(self, name, signature, assembly):
         """Calculate the minimum width needed to fit signature and assembly without wrapping."""
         from PyQt5.QtGui import QFontMetrics
         
@@ -446,10 +460,19 @@ class FunctionNode(QGraphicsRectItem):
         font.setBold(True)
         metrics_bold = QFontMetrics(font)
         
+        # Use larger font for function name (size 10)
+        font_large = QFont("Courier", 10)
+        font_large.setBold(True)
+        metrics_large_bold = QFontMetrics(font_large)
+        
         font.setBold(False)
         metrics_normal = QFontMetrics(font)
         
         max_width = 0
+        
+        # Check function name width (using large bold metrics)
+        function_name_width = metrics_large_bold.width(name)
+        max_width = max(max_width, function_name_width)
         
         # Check signature width (using bold metrics)
         signature_width = metrics_bold.width(signature)
@@ -1708,28 +1731,62 @@ class CallGraphVisualizer(QMainWindow):
             # Move end point horizontally in opposite direction
             end_point.setX(end_point.x() - horizontal_offset * 0.3)
         
-        # Recalculate direction for arrowhead
+        # Recalculate direction for curved path
         dx = end_point.x() - start_point.x()
         dy = end_point.y() - start_point.y()
         length = math.sqrt(dx * dx + dy * dy)
         if length > 0:
-            dx /= length
-            dy /= length
+            dx_norm = dx / length
+            dy_norm = dy / length
+        else:
+            dx_norm = 1.0
+            dy_norm = 0.0
         
-        # Create arrow line
-        line = QGraphicsLineItem(
-            start_point.x(), start_point.y(),
-            end_point.x(), end_point.y()
-        )
+        # Create curved path using cubic bezier
+        path = QPainterPath()
+        path.moveTo(start_point)
+        
+        # Calculate control points for a smooth curve
+        # The curve should bend naturally from start to end
+        # Control points are positioned to create a smooth S-curve or arc
+        curve_strength = min(length * 0.5, 150)  # Control how much the curve bends
+        
+        # For left-to-right flow, create a gentle curve
+        # Control point 1: slightly offset from start in the direction of travel
+        ctrl1_x = start_point.x() + curve_strength * dx_norm
+        ctrl1_y = start_point.y() + curve_strength * dy_norm * 0.3  # Less vertical movement
+        
+        # Control point 2: slightly offset from end in the opposite direction
+        ctrl2_x = end_point.x() - curve_strength * dx_norm
+        ctrl2_y = end_point.y() - curve_strength * dy_norm * 0.3
+        
+        # Create the cubic bezier curve
+        path.cubicTo(ctrl1_x, ctrl1_y, ctrl2_x, ctrl2_y, end_point.x(), end_point.y())
+        
+        # Create path item
+        path_item = QGraphicsPathItem(path)
         pen = QPen(QColor(100, 100, 100), 2)
         pen.setStyle(Qt.DashLine)
-        line.setPen(pen)
-        self.scene.addItem(line)
-        self.edge_items.append(line)
+        path_item.setPen(pen)
+        self.scene.addItem(path_item)
+        self.edge_items.append(path_item)
         
-        # Add arrowhead
+        # Add arrowhead at the end
         arrow_size = 10
-        angle = math.atan2(dy, dx)
+        # Calculate angle at end point (tangent to the curve)
+        # Use the direction from the last control point to the end point
+        dx_end = end_point.x() - ctrl2_x
+        dy_end = end_point.y() - ctrl2_y
+        if dx_end == 0 and dy_end == 0:
+            # Fallback: use overall direction
+            angle = math.atan2(dy, dx)
+        else:
+            length_end = math.sqrt(dx_end * dx_end + dy_end * dy_end)
+            if length_end > 0:
+                dx_end /= length_end
+                dy_end /= length_end
+            angle = math.atan2(dy_end, dx_end)
+        
         arrow_p1 = end_point - QPointF(
             arrow_size * math.cos(angle - math.pi / 6),
             arrow_size * math.sin(angle - math.pi / 6)
@@ -1755,10 +1812,14 @@ class CallGraphVisualizer(QMainWindow):
         self.scene.addItem(arrow2)
         self.edge_items.append(arrow2)
         
-        # Calculate and display shared registers at the center of the arrow
+        # Calculate and display shared registers at the center of the curve
+        # Get point at t=0.5 along the curve
+        t = 0.5
+        # Cubic bezier formula: (1-t)^3*P0 + 3*(1-t)^2*t*P1 + 3*(1-t)*t^2*P2 + t^3*P3
+        mt = 1 - t
         center_point = QPointF(
-            (start_point.x() + end_point.x()) / 2,
-            (start_point.y() + end_point.y()) / 2
+            mt*mt*mt * start_point.x() + 3*mt*mt*t * ctrl1_x + 3*mt*t*t * ctrl2_x + t*t*t * end_point.x(),
+            mt*mt*mt * start_point.y() + 3*mt*mt*t * ctrl1_y + 3*mt*t*t * ctrl2_y + t*t*t * end_point.y()
         )
         
         # Extract registers from both caller and callee
@@ -1924,7 +1985,7 @@ class CallGraphVisualizer(QMainWindow):
             self.edge_items.append(arrow2)
     
     def auto_layout(self):
-        """Automatically layout nodes in a circular or force-directed manner."""
+        """Automatically layout nodes in a hierarchical left-to-right manner."""
         if not self.nodes:
             return
         
@@ -1948,46 +2009,91 @@ class CallGraphVisualizer(QMainWindow):
             max_width = max(max_width, node_rect.width())
             max_height = max(max_height, node_rect.height())
         
-        # Calculate minimum spacing needed to prevent overlaps
-        # When nodes are placed in a circle, we need to ensure the arc distance
-        # between adjacent nodes is sufficient. The chord length between adjacent
-        # nodes should be at least the diagonal of the largest node plus padding.
-        max_diagonal = math.sqrt(max_width * max_width + max_height * max_height)
+        # Build adjacency lists for both directions
+        # incoming_edges: node -> set of nodes that call it
+        # outgoing_edges: node -> set of nodes it calls
+        incoming_edges = defaultdict(set)
+        outgoing_edges = defaultdict(set)
         
-        # Add generous padding between nodes (minimum 80 pixels)
-        padding = 80
-        min_chord_length = max_diagonal + padding
+        for caller, callee in self.edges:
+            if caller in self.nodes and callee in self.nodes:
+                outgoing_edges[caller].add(callee)
+                incoming_edges[callee].add(caller)
         
-        # Calculate radius based on chord length formula:
-        # chord_length = 2 * radius * sin(angle/2)
-        # For n nodes evenly spaced: angle = 2*pi/n
-        # So: chord_length = 2 * radius * sin(pi/n)
-        # Therefore: radius = chord_length / (2 * sin(pi/n))
-        if n > 1:
-            angle_per_node = 2 * math.pi / n
-            min_radius = min_chord_length / (2 * math.sin(angle_per_node / 2))
-        else:
-            min_radius = 200
+        # Find root nodes (nodes with no incoming edges)
+        # If no roots exist (all nodes are in cycles), pick nodes with fewest incoming edges
+        root_nodes = [node for node in node_list if len(incoming_edges[node]) == 0]
         
-        # Use a minimum radius and scale up if needed
-        center_x, center_y = 600, 500
-        radius = max(min_radius, 350)
+        if not root_nodes:
+            # All nodes are in cycles - pick nodes with minimum incoming edges
+            min_incoming = min(len(incoming_edges[node]) for node in node_list)
+            root_nodes = [node for node in node_list if len(incoming_edges[node]) == min_incoming]
         
-        # For very few nodes, use a larger radius for better visual spacing
-        if n <= 3:
-            radius = max(radius, 450)
-        elif n <= 6:
-            radius = max(radius, 400)
+        # Assign levels using BFS from root nodes
+        levels = {}  # node -> level (0-based, left to right)
+        visited = set()
+        queue = []
         
-        # Place nodes in a circle with proper spacing
-        for i, func_name in enumerate(node_list):
-            angle = 2 * math.pi * i / n
-            node = self.nodes[func_name]
-            node_rect = node.rect()
-            # Center the rectangle based on its actual size
-            x = center_x + radius * math.cos(angle) - node_rect.width() / 2
-            y = center_y + radius * math.sin(angle) - node_rect.height() / 2
-            node.setPos(x, y)
+        # Initialize queue with root nodes at level 0
+        for root in root_nodes:
+            levels[root] = 0
+            queue.append(root)
+            visited.add(root)
+        
+        # BFS to assign levels
+        while queue:
+            current = queue.pop(0)
+            current_level = levels[current]
+            
+            # Process outgoing edges (nodes this node calls)
+            for callee in outgoing_edges[current]:
+                if callee not in visited:
+                    levels[callee] = current_level + 1
+                    visited.add(callee)
+                    queue.append(callee)
+                else:
+                    # Already visited - assign to a level that's at least current_level + 1
+                    if levels[callee] <= current_level:
+                        levels[callee] = current_level + 1
+        
+        # Handle any unvisited nodes (disconnected components)
+        for node in node_list:
+            if node not in visited:
+                # Assign to a new level after the maximum existing level
+                max_level = max(levels.values()) if levels else -1
+                levels[node] = max_level + 1
+        
+        # Group nodes by level
+        nodes_by_level = defaultdict(list)
+        for node, level in levels.items():
+            nodes_by_level[level].append(node)
+        
+        # Calculate spacing
+        horizontal_padding = max_width + 150  # Space between levels
+        vertical_padding = max_height + 80    # Space between nodes in same level
+        
+        # Calculate positions for each level
+        start_x = 50
+        start_y = 50
+        
+        # Position nodes level by level
+        for level in sorted(nodes_by_level.keys()):
+            level_nodes = nodes_by_level[level]
+            x = start_x + level * horizontal_padding
+            
+            # Calculate total height needed for this level
+            total_height = sum(self.nodes[node].rect().height() for node in level_nodes)
+            total_height += vertical_padding * (len(level_nodes) - 1)
+            
+            # Start y position to center this level vertically
+            current_y = start_y
+            
+            # Position each node in this level
+            for node_name in level_nodes:
+                node = self.nodes[node_name]
+                node_rect = node.rect()
+                node.setPos(x, current_y)
+                current_y += node_rect.height() + vertical_padding
         
         # Redraw edges with new positions
         for caller, callee in self.edges:
