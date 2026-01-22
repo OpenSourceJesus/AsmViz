@@ -2995,8 +2995,8 @@ class CallGraphVisualizer(QMainWindow):
         max_level_height = 0
         for level in sorted(nodes_by_level.keys()):
             level_nodes = nodes_by_level[level]
-            # Sort nodes within this level alphabetically for consistent ordering
-            level_nodes_sorted = sorted(level_nodes)
+            # Sort nodes within this level by number of unique function calls (descending)
+            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(outgoing_edges.get(node_name, set())), reverse=True)
             
             # Find maximum width in this level
             max_width_in_level = max(self.nodes[node].rect().width() for node in level_nodes_sorted)
@@ -3013,8 +3013,9 @@ class CallGraphVisualizer(QMainWindow):
             level_nodes = nodes_by_level[level]
             x = current_x
             
-            # Sort nodes within this level alphabetically for consistent ordering
-            level_nodes_sorted = sorted(level_nodes)
+            # Sort nodes within this level by number of unique function calls (descending)
+            # Functions with more unique calls appear higher in the stack
+            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(outgoing_edges.get(node_name, set())), reverse=True)
             
             # Calculate total height needed for this level
             total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
