@@ -2609,8 +2609,17 @@ class CallGraphVisualizer(QMainWindow):
         callee_line_y = callee_node.scenePos().y() + callee_body_y
         
         # Calculate direction vector
+        # Force arrows to always go rightwards (callee should always be to the right of caller)
         dx = callee_node.scenePos().x() - caller_node.scenePos().x()
         dy = callee_line_y - caller_line_y
+        
+        # If callee is to the left of caller (shouldn't happen with proper layout, but handle it)
+        # Force it to go right by ensuring minimum horizontal distance
+        min_horizontal_distance = 100  # Minimum horizontal distance for arrows
+        if dx < min_horizontal_distance:
+            # Adjust callee position for arrow drawing (visual only, doesn't change node position)
+            dx = min_horizontal_distance
+        
         length = math.sqrt(dx * dx + dy * dy)
         
         if length == 0:
@@ -2620,60 +2629,18 @@ class CallGraphVisualizer(QMainWindow):
         dx_norm = dx / length
         dy_norm = dy / length
         
-        # Prevent vertical arrows by ensuring minimum horizontal component
-        # If the arrow would be too vertical, add horizontal offset
-        min_horizontal_ratio = 0.2  # Minimum 20% horizontal component
-        horizontal_offset = 0
-        
-        if abs(dx_norm) < min_horizontal_ratio:
-            # Calculate required horizontal offset to achieve minimum ratio
-            # We want: |dx_offset| / sqrt(dx_offset^2 + dy^2) >= min_horizontal_ratio
-            # Solving: dx_offset^2 >= min_horizontal_ratio^2 * (dx_offset^2 + dy^2)
-            # dx_offset^2 * (1 - min_horizontal_ratio^2) >= min_horizontal_ratio^2 * dy^2
-            # dx_offset >= min_horizontal_ratio * |dy| / sqrt(1 - min_horizontal_ratio^2)
-            min_horizontal_distance = min_horizontal_ratio * abs(dy) / math.sqrt(1 - min_horizontal_ratio * min_horizontal_ratio)
-            horizontal_offset = min_horizontal_distance - abs(dx)
-            if horizontal_offset > 0:
-                # Add offset in the direction we're going
-                if dx >= 0:
-                    horizontal_offset = horizontal_offset
-                else:
-                    horizontal_offset = -horizontal_offset
-        
         # Calculate start and end points on rectangle edges
-        # Start from the line y-position, exit from left or right edge
-        caller_line_x = caller_node.scenePos().x() + caller_x
-        
-        # Determine which edge to exit from based on direction
-        if dx + horizontal_offset >= 0:
-            # Going right - exit from right edge
-            start_point = QPointF(caller_node.scenePos().x() + caller_rect.width(), caller_line_y)
-        else:
-            # Going left - exit from left edge
-            start_point = QPointF(caller_node.scenePos().x(), caller_line_y)
+        # Always exit from right edge of caller and enter at left edge of callee
+        start_point = QPointF(caller_node.scenePos().x() + caller_rect.width(), caller_line_y)
+        end_point = QPointF(callee_node.scenePos().x(), callee_line_y)
         
         # Clamp start point y to rectangle bounds
         start_point.setY(max(caller_node.scenePos().y(), 
                              min(caller_node.scenePos().y() + caller_rect.height(), start_point.y())))
         
-        # End point: enter at left or right edge, at the line y-position
-        if dx + horizontal_offset >= 0:
-            # Coming from left - enter at left edge
-            end_point = QPointF(callee_node.scenePos().x(), callee_line_y)
-        else:
-            # Coming from right - enter at right edge
-            end_point = QPointF(callee_node.scenePos().x() + callee_rect.width(), callee_line_y)
-        
         # Clamp end point y to rectangle bounds
         end_point.setY(max(callee_node.scenePos().y(), 
                           min(callee_node.scenePos().y() + callee_rect.height(), end_point.y())))
-        
-        # If we need horizontal offset, adjust the points
-        if horizontal_offset != 0:
-            # Move start point horizontally
-            start_point.setX(start_point.x() + horizontal_offset * 0.3)
-            # Move end point horizontally in opposite direction
-            end_point.setX(end_point.x() - horizontal_offset * 0.3)
         
         # Recalculate direction for curved path
         dx = end_point.x() - start_point.x()
@@ -2961,7 +2928,7 @@ class CallGraphVisualizer(QMainWindow):
         
         for caller, callee in self.edges:
             if caller in self.nodes and callee in self.nodes:
-                outgoing_edges[caller].add(callee)
+                outgoing_edges[caller].add(callee)  
                 incoming_edges[callee].add(caller)
         
         # Find root nodes (nodes with no incoming edges)
@@ -2973,38 +2940,41 @@ class CallGraphVisualizer(QMainWindow):
             min_incoming = min(len(incoming_edges[node]) for node in node_list)
             root_nodes = [node for node in node_list if len(incoming_edges[node]) == min_incoming]
         
-        # Assign levels using BFS from root nodes
+        # Assign levels ensuring callees are always to the right of callers
+        # Use iterative constraint satisfaction: if A calls B, then level(B) > level(A)
         levels = {}  # node -> level (0-based, left to right)
-        visited = set()
-        queue = []
         
-        # Initialize queue with root nodes at level 0
-        for root in root_nodes:
-            levels[root] = 0
-            queue.append(root)
-            visited.add(root)
-        
-        # BFS to assign levels
-        while queue:
-            current = queue.pop(0)
-            current_level = levels[current]
-            
-            # Process outgoing edges (nodes this node calls)
-            for callee in outgoing_edges[current]:
-                if callee not in visited:
-                    levels[callee] = current_level + 1
-                    visited.add(callee)
-                    queue.append(callee)
-                else:
-                    # Already visited - assign to a level that's at least current_level + 1
-                    if levels[callee] <= current_level:
-                        levels[callee] = current_level + 1
-        
-        # Handle any unvisited nodes (disconnected components)
+        # Initialize all nodes: root nodes to 0, others to a high value
         for node in node_list:
-            if node not in visited:
-                # Assign to a new level after the maximum existing level
-                max_level = max(levels.values()) if levels else -1
+            if node in root_nodes:
+                levels[node] = 0
+            else:
+                levels[node] = len(node_list)  # Start high, will be reduced by constraints
+        
+        # Iteratively enforce constraints until convergence
+        # Constraint: if caller calls callee, then level(callee) >= level(caller) + 1
+        changed = True
+        max_iterations = len(node_list) * 2  # Prevent infinite loops
+        iteration = 0
+        
+        while changed and iteration < max_iterations:
+            changed = False
+            iteration += 1
+            
+            # For each edge, enforce the constraint
+            for caller, callee in self.edges:
+                if caller in self.nodes and callee in self.nodes:
+                    # Callee must be at least one level to the right of caller
+                    required_level = levels[caller] + 1
+                    if levels[callee] < required_level:
+                        levels[callee] = required_level
+                        changed = True
+        
+        # Handle any nodes that weren't reached (shouldn't happen, but safety check)
+        # Place disconnected components to the right
+        max_level = max(levels.values()) if levels else -1
+        for node in node_list:
+            if node not in levels:
                 levels[node] = max_level + 1
         
         # Group nodes by level
@@ -3012,33 +2982,39 @@ class CallGraphVisualizer(QMainWindow):
         for node, level in levels.items():
             nodes_by_level[level].append(node)
         
-        # Calculate spacing - make it more horizontal
-        horizontal_padding = max_width * 2.5 + 300  # Much larger horizontal spacing between levels
+        # Calculate spacing - equal horizontal spacing between all levels
+        horizontal_padding = 750  # Fixed equal spacing from right edge of one level to left edge of next
         vertical_padding = max_height * 0.3 + 20     # Smaller vertical spacing within levels
         
         # Position nodes level by level (left to right shows call hierarchy)
         start_x = 50
         start_y = 50
         
-        # Find the maximum total height across all levels to center-align levels
+        # Find the maximum width and total height for each level
+        level_max_widths = {}  # level -> max width of nodes in that level
         max_level_height = 0
         for level in sorted(nodes_by_level.keys()):
             level_nodes = nodes_by_level[level]
-            # Sort nodes within this level by register count (descending - more registers = higher)
-            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(getattr(self.nodes[node_name], 'call_graph_registers', set())), reverse=True)
+            # Sort nodes within this level alphabetically for consistent ordering
+            level_nodes_sorted = sorted(level_nodes)
+            
+            # Find maximum width in this level
+            max_width_in_level = max(self.nodes[node].rect().width() for node in level_nodes_sorted)
+            level_max_widths[level] = max_width_in_level
             
             # Calculate total height needed for this level
             total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
             total_height += vertical_padding * (len(level_nodes_sorted) - 1)
             max_level_height = max(max_level_height, total_height)
         
-        # Position nodes level by level
+        # Position nodes level by level, ensuring equal spacing from right edge to left edge
+        current_x = start_x
         for level in sorted(nodes_by_level.keys()):
             level_nodes = nodes_by_level[level]
-            x = start_x + level * horizontal_padding
+            x = current_x
             
-            # Sort nodes within this level by register count (descending - more registers = higher)
-            level_nodes_sorted = sorted(level_nodes, key=lambda node_name: len(getattr(self.nodes[node_name], 'call_graph_registers', set())), reverse=True)
+            # Sort nodes within this level alphabetically for consistent ordering
+            level_nodes_sorted = sorted(level_nodes)
             
             # Calculate total height needed for this level
             total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
@@ -3054,6 +3030,9 @@ class CallGraphVisualizer(QMainWindow):
                 node_rect = node.rect()
                 node.setPos(x, current_y)
                 current_y += node_rect.height() + vertical_padding
+            
+            # Update current_x for next level: right edge of current level + padding
+            current_x = x + level_max_widths[level] + horizontal_padding
         
         # Redraw edges with new positions
         for caller, callee in self.edges:
