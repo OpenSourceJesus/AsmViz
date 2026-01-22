@@ -209,7 +209,7 @@ class CallGraphExtractor:
             # Visit all nodes in the AST, passing source file for tracking
             self.visit(ast, source_file=filename)
         
-        return self.functions, self.calls, self.calls_with_args
+        return self.functions, self.calls, self.calls_with_args, self.function_sources
     
     def visit(self, node, source_file=None):
         """Recursively visit AST nodes."""
@@ -294,10 +294,11 @@ def extract_call_graph(filenames):
         filenames: Path to a C source file, or list of paths to C source files
         
     Returns:
-        tuple: (functions dict, calls dict, calls_with_args dict)
+        tuple: (functions dict, calls dict, calls_with_args dict, function_sources dict)
         - functions: function_name -> FunctionDef node
         - calls: caller -> set of callees (for backward compatibility)
         - calls_with_args: caller -> list of (callee, args_string) tuples
+        - function_sources: function_name -> source file path
     """
     extractor = CallGraphExtractor()
     return extractor.extract(filenames)

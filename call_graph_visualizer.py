@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QLabel,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox,
-                             QScrollArea, QTextEdit)
+                             QScrollArea, QTextEdit, QTabWidget, QTabBar, QListWidget, QStackedWidget)
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
@@ -1208,6 +1208,13 @@ class CallGraphVisualizer(QMainWindow):
         self.global_variables = {}  # global_var_name -> type string
         self.global_var_usage = {}  # (global_var_name, func_name) -> {'r': bool, 'w': bool}
         self.structs = {}  # struct_name -> {'members': [(member_name, member_type), ...]}
+        self.globals_content = "No global variables found"
+        self.structs_content = "No structs found"
+        self.current_data_tab = 0  # 0 = Global Variables, 1 = Structs
+        self.function_sources = {}  # function_name -> source file path
+        self.directory_c_files = []  # List of C files when directory is loaded
+        self.is_directory_mode = False  # Whether we're in directory mode
+        self.selected_file_filter = None  # Currently selected file for filtering (None = show all)
         self.init_ui()
         
         # Load file if provided
@@ -1234,29 +1241,37 @@ class CallGraphVisualizer(QMainWindow):
         left_panel_layout = QVBoxLayout()
         left_panel.setLayout(left_panel_layout)
         
-        # Global Variables Section
-        globals_label = QLabel("Global Variables")
-        globals_label.setFont(QFont("Arial", 10, QFont.Bold))
-        left_panel_layout.addWidget(globals_label)
+        # Tab bar for switching between File Selection (if directory), Globals, and Structs
+        self.data_tab_bar = QTabBar()
+        self.file_selection_tab_index = -1  # Index of file selection tab (-1 if not present)
+        self.globals_tab_index = 0  # Will be updated based on whether file selection tab exists
+        self.structs_tab_index = 1  # Will be updated based on whether file selection tab exists
+        self.data_tab_bar.addTab("🌐")
+        self.data_tab_bar.addTab("🏛")
+        self.data_tab_bar.currentChanged.connect(self.on_tab_changed)
+        left_panel_layout.addWidget(self.data_tab_bar)
         
-        # Scrollable text area for global variables
-        self.globals_text = QTextEdit()
-        self.globals_text.setReadOnly(True)
-        self.globals_text.setFont(QFont("Courier", 9))
-        self.globals_text.setPlainText("No global variables found")
-        left_panel_layout.addWidget(self.globals_text)
+        # Stacked widget to switch between file list and text edit
+        self.data_stacked = QStackedWidget()
         
-        # Structs Section
-        structs_label = QLabel("Structs")
-        structs_label.setFont(QFont("Arial", 10, QFont.Bold))
-        left_panel_layout.addWidget(structs_label)
+        # File selection list (for directory mode)
+        self.file_list_widget = QListWidget()
+        self.file_list_widget.itemClicked.connect(self.on_file_selected)
+        self.data_stacked.addWidget(self.file_list_widget)  # Index 0
         
-        # Scrollable text area for structs
-        self.structs_text = QTextEdit()
-        self.structs_text.setReadOnly(True)
-        self.structs_text.setFont(QFont("Courier", 9))
-        self.structs_text.setPlainText("No structs found")
-        left_panel_layout.addWidget(self.structs_text)
+        # Text area for Globals/Structs
+        self.data_text = QTextEdit()
+        self.data_text.setReadOnly(True)
+        self.data_text.setFont(QFont("Courier", 9))
+        self.data_text.setPlainText("No global variables found")
+        self.data_stacked.addWidget(self.data_text)  # Index 1
+        
+        # Start with text edit visible
+        self.data_stacked.setCurrentIndex(1)
+        left_panel_layout.addWidget(self.data_stacked)
+        
+        # Store current tab index (0 = File Selection if exists, then Globals, then Structs)
+        self.current_data_tab = 0
         
         main_layout.addWidget(left_panel)
         
@@ -1314,12 +1329,20 @@ class CallGraphVisualizer(QMainWindow):
                 assembly_files = asm_files
                 self.current_filename = path
                 display_name = os.path.basename(os.path.abspath(path))
+                # Enable directory mode if we have multiple C files
+                self.is_directory_mode = len(c_filenames) > 1
+                self.directory_c_files = c_filenames if self.is_directory_mode else []
+                self.selected_file_filter = None  # Reset filter
             elif isinstance(path, list):
                 # It's a list of files
                 c_filenames = [f for f in path if f.endswith('.c')]
                 assembly_files = [f for f in path if f.endswith(('.s', '.S'))]
                 self.current_filename = path[0] if path else None
                 display_name = f"{len(path)} files"
+                # Enable directory mode if we have multiple C files
+                self.is_directory_mode = len(c_filenames) > 1
+                self.directory_c_files = c_filenames if self.is_directory_mode else []
+                self.selected_file_filter = None  # Reset filter
             else:
                 # Single file - check if it's a C file or assembly file
                 if path.endswith('.c'):
@@ -1331,6 +1354,10 @@ class CallGraphVisualizer(QMainWindow):
                     # We'll need to parse it differently
                 self.current_filename = path
                 display_name = os.path.basename(path)
+                # Single file mode - disable directory mode
+                self.is_directory_mode = False
+                self.directory_c_files = []
+                self.selected_file_filter = None  # Reset filter
             
             if not c_filenames and not assembly_files:
                 QMessageBox.warning(self, "No Files", 
@@ -1341,12 +1368,16 @@ class CallGraphVisualizer(QMainWindow):
             # Extract call graph from C files
             if c_filenames:
                 result = extract_call_graph(c_filenames)
-                if len(result) == 3:
+                if len(result) == 4:
+                    self.functions, self.calls, self.calls_with_args, self.function_sources = result
+                elif len(result) == 3:
                     self.functions, self.calls, self.calls_with_args = result
+                    self.function_sources = {}
                 else:
                     # Backward compatibility
                     self.functions, self.calls = result
                     self.calls_with_args = defaultdict(list)
+                    self.function_sources = {}
             else:
                 # No C files - can't extract call graph, but we can still parse assembly
                 self.functions = {}
@@ -1404,6 +1435,9 @@ class CallGraphVisualizer(QMainWindow):
             self.update_globals_display()
             # Update structs display
             self.update_structs_display()
+            
+            # Update file selection tab (add/remove based on directory mode)
+            self.update_file_selection_tab()
             
             # Update status
             file_count = len(c_filenames) + len(assembly_files)
@@ -1487,8 +1521,19 @@ class CallGraphVisualizer(QMainWindow):
         self.global_variables = {}
         self.global_var_usage = {}
         self.structs = {}
-        self.globals_text.setPlainText("No global variables found")
-        self.structs_text.setPlainText("No structs found")
+        self.globals_content = "No global variables found"
+        self.structs_content = "No structs found"
+        self.function_sources = {}
+        self.is_directory_mode = False
+        self.directory_c_files = []
+        self.selected_file_filter = None
+        # Update tabs (remove file selection tab if it exists)
+        self.update_file_selection_tab()
+        # Update display based on current tab
+        if self.current_data_tab == self.globals_tab_index:
+            self.data_text.setPlainText(self.globals_content)
+        elif self.current_data_tab == self.structs_tab_index:
+            self.data_text.setPlainText(self.structs_content)
         self.status_label.setText("No file loaded")
     
     def extract_global_variables(self, c_filenames):
@@ -1749,53 +1794,57 @@ class CallGraphVisualizer(QMainWindow):
     
     def update_globals_display(self):
         """Update the global variables display panel."""
+        # Store the content, but only update the display if the globals tab is active
         if not self.global_variables:
-            self.globals_text.setPlainText("No global variables found")
-            return
-        
-        # Build display text
-        lines = []
-        
-        # Sort global variables alphabetically
-        sorted_globals = sorted(self.global_variables.items())
-        
-        for global_var, var_type in sorted_globals:
-            # Display variable name with type in parentheses
-            lines.append(f"{global_var} ({var_type}):")
+            self.globals_content = "No global variables found"
+        else:
+            # Build display text
+            lines = []
             
-            # Get all functions that use this global variable
-            # Store as list of tuples (func_name, usage) where usage is a tuple (r, w)
-            funcs_using_var = []
-            for (var_name, func_name), usage in self.global_var_usage.items():
-                if var_name == global_var:
-                    # Convert usage dict to tuple for sorting
-                    funcs_using_var.append((func_name, (usage.get('r', False), usage.get('w', False))))
+            # Sort global variables alphabetically
+            sorted_globals = sorted(self.global_variables.items())
             
-            if not funcs_using_var:
-                lines.append("  (no functions use this variable)")
-            else:
-                # Sort functions alphabetically
-                sorted_funcs = sorted(funcs_using_var, key=lambda x: x[0])
+            for global_var, var_type in sorted_globals:
+                # Display variable name with type in parentheses
+                lines.append(f"{global_var} ({var_type}):")
                 
-                for func_name, (reads, writes) in sorted_funcs:
-                    # Build prefix: r-, w-, or rw-
-                    prefix_parts = []
-                    if reads:
-                        prefix_parts.append('r')
-                    if writes:
-                        prefix_parts.append('w')
+                # Get all functions that use this global variable
+                # Store as list of tuples (func_name, usage) where usage is a tuple (r, w)
+                funcs_using_var = []
+                for (var_name, func_name), usage in self.global_var_usage.items():
+                    if var_name == global_var:
+                        # Convert usage dict to tuple for sorting
+                        funcs_using_var.append((func_name, (usage.get('r', False), usage.get('w', False))))
+                
+                if not funcs_using_var:
+                    lines.append("  (no functions use this variable)")
+                else:
+                    # Sort functions alphabetically
+                    sorted_funcs = sorted(funcs_using_var, key=lambda x: x[0])
                     
-                    if prefix_parts:
-                        # Join without separator, then add dash: 'r' + 'w' = 'rw-'
-                        prefix = ''.join(prefix_parts) + '-'
-                    else:
-                        prefix = ''
-                    
-                    lines.append(f"  {prefix}{func_name}")
+                    for func_name, (reads, writes) in sorted_funcs:
+                        # Build prefix: r-, w-, or rw-
+                        prefix_parts = []
+                        if reads:
+                            prefix_parts.append('r')
+                        if writes:
+                            prefix_parts.append('w')
+                        
+                        if prefix_parts:
+                            # Join without separator, then add dash: 'r' + 'w' = 'rw-'
+                            prefix = ''.join(prefix_parts) + '-'
+                        else:
+                            prefix = ''
+                        
+                        lines.append(f"  {prefix}{func_name}")
+                
+                lines.append("")  # Empty line between variables
             
-            lines.append("")  # Empty line between variables
+            self.globals_content = '\n'.join(lines)
         
-        self.globals_text.setPlainText('\n'.join(lines))
+        # Update display if globals tab is currently active
+        if self.current_data_tab == 0:
+            self.data_text.setPlainText(self.globals_content)
     
     def extract_structs(self, c_filenames):
         """
@@ -1980,32 +2029,135 @@ class CallGraphVisualizer(QMainWindow):
     
     def update_structs_display(self):
         """Update the structs display panel."""
+        # Store the content, but only update the display if the structs tab is active
         if not self.structs:
-            self.structs_text.setPlainText("No structs found")
+            self.structs_content = "No structs found"
+        else:
+            # Build display text
+            lines = []
+            
+            # Sort structs alphabetically
+            sorted_structs = sorted(self.structs.items())
+            
+            for struct_name, struct_info in sorted_structs:
+                # Display struct name (without 'struct' prefix)
+                lines.append(f"{struct_name}:")
+                
+                # Display members
+                members = struct_info.get('members', [])
+                if not members:
+                    lines.append("  (no members)")
+                else:
+                    for member_name, member_type in members:
+                        # Format: member_name (type) - no semicolon
+                        lines.append(f"  {member_name} ({member_type})")
+                
+                lines.append("")  # Empty line between structs
+            
+            self.structs_content = '\n'.join(lines)
+        
+        # Update display if structs tab is currently active
+        if self.current_data_tab == 1:
+            self.data_text.setPlainText(self.structs_content)
+    
+    def on_tab_changed(self, index):
+        """Handle tab change to update the displayed content."""
+        self.current_data_tab = index
+        
+        # Determine which tab is active
+        if self.file_selection_tab_index >= 0 and index == self.file_selection_tab_index:
+            # File selection tab - show file list
+            self.data_stacked.setCurrentIndex(0)  # Show file list widget
+            # Highlight the currently selected file
+            self._highlight_selected_file()
+        else:
+            # Globals or Structs tab - show text edit
+            self.data_stacked.setCurrentIndex(1)  # Show text edit
+            
+            # Determine if it's Globals or Structs
+            if index == self.globals_tab_index:
+                # Globals tab
+                if hasattr(self, 'globals_content'):
+                    self.data_text.setPlainText(self.globals_content)
+                else:
+                    self.data_text.setPlainText("No global variables found")
+            elif index == self.structs_tab_index:
+                # Structs tab
+                if hasattr(self, 'structs_content'):
+                    self.data_text.setPlainText(self.structs_content)
+                else:
+                    self.data_text.setPlainText("No structs found")
+    
+    def update_file_selection_tab(self):
+        """Add or remove the file selection tab based on directory mode."""
+        if self.is_directory_mode and len(self.directory_c_files) > 1:
+            # Add file selection tab if it doesn't exist
+            if self.file_selection_tab_index < 0:
+                # Insert at the beginning
+                self.data_tab_bar.insertTab(0, "🗅")
+                self.file_selection_tab_index = 0
+                self.globals_tab_index = 1
+                self.structs_tab_index = 2
+                
+                # Update file list
+                self.file_list_widget.clear()
+                # Add "All Files" option
+                self.file_list_widget.addItem("(All Files)")
+                # Add each C file
+                for c_file in sorted(self.directory_c_files):
+                    display_name = os.path.basename(c_file)
+                    self.file_list_widget.addItem(display_name)
+                
+                # Highlight the currently selected file (or "All Files" if none selected)
+                self._highlight_selected_file()
+        else:
+            # Remove file selection tab if it exists
+            if self.file_selection_tab_index >= 0:
+                self.data_tab_bar.removeTab(self.file_selection_tab_index)
+                self.file_selection_tab_index = -1
+                self.globals_tab_index = 0
+                self.structs_tab_index = 1
+                # Make sure we're showing the text edit, not the file list
+                self.data_stacked.setCurrentIndex(1)
+    
+    def _highlight_selected_file(self):
+        """Highlight the currently selected file in the file list."""
+        if self.file_selection_tab_index < 0:
             return
         
-        # Build display text
-        lines = []
+        # Find and select the appropriate item
+        if self.selected_file_filter is None:
+            # Select "(All Files)"
+            for i in range(self.file_list_widget.count()):
+                if self.file_list_widget.item(i).text() == "(All Files)":
+                    self.file_list_widget.setCurrentRow(i)
+                    break
+        else:
+            # Select the file that matches selected_file_filter
+            filter_basename = os.path.basename(self.selected_file_filter)
+            for i in range(self.file_list_widget.count()):
+                if self.file_list_widget.item(i).text() == filter_basename:
+                    self.file_list_widget.setCurrentRow(i)
+                    break
+    
+    def on_file_selected(self, item):
+        """Handle file selection from the file list."""
+        selected_text = item.text()
         
-        # Sort structs alphabetically
-        sorted_structs = sorted(self.structs.items())
+        if selected_text == "(All Files)":
+            self.selected_file_filter = None
+        else:
+            # Find the full path of the selected file
+            for c_file in self.directory_c_files:
+                if os.path.basename(c_file) == selected_text:
+                    self.selected_file_filter = c_file
+                    break
         
-        for struct_name, struct_info in sorted_structs:
-            # Display struct name (without 'struct' prefix)
-            lines.append(f"{struct_name}:")
-            
-            # Display members
-            members = struct_info.get('members', [])
-            if not members:
-                lines.append("  (no members)")
-            else:
-                for member_name, member_type in members:
-                    # Format: member_name (type) - no semicolon
-                    lines.append(f"  {member_name} ({member_type})")
-            
-            lines.append("")  # Empty line between structs
+        # Highlight the selected item
+        self._highlight_selected_file()
         
-        self.structs_text.setPlainText('\n'.join(lines))
+        # Redraw the graph with the filter
+        self.draw_graph()
     
     def draw_graph(self):
         """Draw the call graph."""
@@ -2018,8 +2170,19 @@ class CallGraphVisualizer(QMainWindow):
         if not self.functions:
             return
         
-        # Create nodes for all functions with signature and assembly
-        for func_name in self.functions.keys():
+        # Filter functions based on selected file (if in directory mode)
+        filtered_functions = set()
+        if self.selected_file_filter and self.function_sources:
+            # Only show functions from the selected file
+            for func_name, source_file in self.function_sources.items():
+                if source_file == self.selected_file_filter:
+                    filtered_functions.add(func_name)
+        else:
+            # Show all functions
+            filtered_functions = set(self.functions.keys())
+        
+        # Create nodes for filtered functions with signature and assembly
+        for func_name in filtered_functions:
             # Skip functions that don't have function_info (e.g., assembly-only functions without proper entry)
             if func_name not in self.function_info:
                 continue
@@ -2034,7 +2197,7 @@ class CallGraphVisualizer(QMainWindow):
             self.nodes[func_name] = node
             self.scene.addItem(node)
         
-        # Create edges for function calls
+        # Create edges for function calls (only between filtered functions)
         for caller, callees in self.calls.items():
             if caller in self.nodes:
                 for callee in callees:
