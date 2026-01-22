@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox,
                              QScrollArea, QTextEdit, QTabWidget, QTabBar, QListWidget, QStackedWidget,
                              QComboBox)
-from PyQt5.QtCore import Qt, QRectF, QPointF
+from PyQt5.QtCore import Qt, QRectF, QPointF, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
 import sys
@@ -20,7 +20,12 @@ from collections import defaultdict
 
 
 class PanGraphicsView(QGraphicsView):
-    """Custom QGraphicsView that supports panning with left, right, or middle mouse button."""
+    """Custom QGraphicsView that supports panning with right or middle mouse button only.
+    Left click on a node selects it for the overlay; left click on background clears overlay.
+    Left drag does not pan."""
+    
+    node_left_clicked = pyqtSignal(object)   # emits FunctionNode when left-clicked
+    background_left_clicked = pyqtSignal()   # when left-click on scene background
     
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -28,70 +33,64 @@ class PanGraphicsView(QGraphicsView):
         self.pan_button_pressed = False
         self.last_pan_point = QPointF()
         self.setRenderHint(QPainter.Antialiasing)
-        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.setDragMode(QGraphicsView.NoDrag)
+    
+    def _find_function_node_at(self, view_pos):
+        """Return the FunctionNode under view_pos, or None. Traverses parent if item is a child."""
+        item = self.itemAt(view_pos)
+        while item is not None:
+            if isinstance(item, FunctionNode):
+                return item
+            item = item.parentItem()
+        return None
     
     def mousePressEvent(self, event):
-        """Handle mouse press events for panning."""
-        # Check if left, right, or middle mouse button is pressed
-        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
-            # Store the button press but don't start panning yet
-            # Panning will start when the mouse actually moves
+        """Handle mouse press: only right/middle can start panning."""
+        if event.button() in (Qt.RightButton, Qt.MiddleButton):
             self.pan_button_pressed = True
             self.last_pan_point = event.pos()
-            # Call super() to allow event to propagate to items for click detection
-            # We'll only start panning if the mouse moves
-            super().mousePressEvent(event)
-        else:
-            # Let the parent handle other buttons
-            super().mousePressEvent(event)
+        super().mousePressEvent(event)
     
     def mouseMoveEvent(self, event):
-        """Handle mouse move events for panning."""
+        """Handle mouse move: pan only when right/middle was used and drag threshold exceeded."""
         if self.pan_button_pressed:
-            # Start panning if we haven't already and mouse has moved
             if not self.panning:
-                # Check if mouse has moved enough to start panning (threshold of 3 pixels)
                 delta = event.pos() - self.last_pan_point
                 if abs(delta.x()) > 3 or abs(delta.y()) > 3:
                     self.panning = True
                     self.setCursor(Qt.ClosedHandCursor)
-                    # Disable rubber band drag when panning
-                    self.setDragMode(QGraphicsView.NoDrag)
             
             if self.panning:
-                # Calculate the delta movement
                 delta = event.pos() - self.last_pan_point
                 self.last_pan_point = event.pos()
-                
-                # Scroll the view
                 h_bar = self.horizontalScrollBar()
                 v_bar = self.verticalScrollBar()
                 h_bar.setValue(h_bar.value() - delta.x())
                 v_bar.setValue(v_bar.value() - delta.y())
             else:
-                # Mouse hasn't moved enough yet, let parent handle it
                 super().mouseMoveEvent(event)
         else:
-            # Let the parent handle normal mouse moves
             super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
-        """Handle mouse release events to stop panning."""
-        if event.button() in (Qt.LeftButton, Qt.RightButton, Qt.MiddleButton):
+        """Stop panning on right/middle release. On left release (no pan), emit node or background click."""
+        if event.button() in (Qt.RightButton, Qt.MiddleButton):
             was_panning = self.panning
-            if self.panning:
-                # Restore rubber band drag mode
-                self.setDragMode(QGraphicsView.RubberBandDrag)
             self.panning = False
             self.pan_button_pressed = False
             self.setCursor(Qt.ArrowCursor)
-            # If we were panning, don't propagate the release event to prevent item clicks
-            # If we weren't panning (just a click), propagate to allow item interaction
             if not was_panning:
                 super().mouseReleaseEvent(event)
-        else:
-            # Let the parent handle other buttons
-            super().mouseReleaseEvent(event)
+            return
+        
+        if event.button() == Qt.LeftButton and not self.panning:
+            node = self._find_function_node_at(event.pos())
+            if node is not None:
+                self.node_left_clicked.emit(node)
+            else:
+                self.background_left_clicked.emit()
+        
+        super().mouseReleaseEvent(event)
     
     def wheelEvent(self, event):
         """Handle wheel events for zooming."""
@@ -209,7 +208,7 @@ class FunctionCallRectangle(QGraphicsRectItem):
 class FunctionNode(QGraphicsRectItem):
     """Represents a function node with signature and assembly body."""
     
-    def __init__(self, name, signature, assembly, x, y, width=None, min_height=60, calls=None, function_info=None):
+    def __init__(self, name, signature, assembly, x, y, width=None, min_height=60, calls=None, function_info=None, on_toggle_cb=None):
         # Calculate required width based on content (including function name)
         if width is None:
             width = self.calculate_required_width(name, signature, assembly)
@@ -217,6 +216,7 @@ class FunctionNode(QGraphicsRectItem):
         # Extract registers
         self.calls = calls if calls is not None else {}
         self.function_info = function_info if function_info is not None else {}
+        self.on_toggle_cb = on_toggle_cb
         
         # Get registers used in this function
         func_registers = self.extract_registers_from_assembly(assembly)
@@ -1177,19 +1177,140 @@ class FunctionNode(QGraphicsRectItem):
         self.update()
     
     def mousePressEvent(self, event):
-        """Handle mouse press events to toggle between assembly and C code."""
-        if event.button() == Qt.LeftButton:
-            # Check if click is within the body rectangle (where the code is displayed)
+        """Handle mouse press: right-click on body toggles between assembly and C code."""
+        if event.button() == Qt.RightButton:
             click_pos = event.pos()
             if self.body_rect.contains(click_pos):
-                # Toggle display
                 self.toggle_display()
-                # Accept the event to prevent it from propagating
+                if self.on_toggle_cb:
+                    self.on_toggle_cb(self)
                 event.accept()
                 return
         
-        # For other clicks or clicks outside body, let parent handle it
         super().mousePressEvent(event)
+
+
+class NodeDetailOverlay(QWidget):
+    """Overlay on the right of the graph view showing selected node + its call rectangles. Tied to viewport."""
+    
+    overlay_clicked = pyqtSignal()
+    overlay_resized = pyqtSignal()
+    
+    DEFAULT_WIDTH = 380
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(self.DEFAULT_WIDTH)
+        self.setStyleSheet("background-color: rgba(30, 30, 40, 240); border-left: 1px solid #444;")
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(4, 4, 4, 4)
+        self._scene = QGraphicsScene()
+        self._view = QGraphicsView(self._scene)
+        self._view.setRenderHint(QPainter.Antialiasing)
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._view.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._view.installEventFilter(self)
+        self._layout.addWidget(self._view)
+        self._overlay_node = None
+        self._overlay_call_rects = []
+        self._visualizer = None
+        self.hide()
+    
+    def set_visualizer(self, v):
+        self._visualizer = v
+    
+    def _clear_scene(self):
+        for r in self._overlay_call_rects:
+            if r.scene():
+                self._scene.removeItem(r)
+        self._overlay_call_rects = []
+        if self._overlay_node and self._overlay_node.scene():
+            self._scene.removeItem(self._overlay_node)
+        self._overlay_node = None
+    
+    def set_node(self, source_node):
+        """Show source_node and its call rectangles in the overlay."""
+        if not self._visualizer:
+            return
+        self._clear_scene()
+        viz = self._visualizer
+        name = source_node.name
+        info = viz.function_info.get(name, {})
+        sig = info.get('signature', f"{name}()")
+        asm = info.get('assembly', "Assembly unavailable")
+        node = FunctionNode(name, sig, asm, 0, 0, calls=viz.calls, function_info=viz.function_info, on_toggle_cb=None)
+        if not source_node.showing_assembly and node.c_code:
+            node.toggle_display()
+        node.setPos(0, 0)
+        self._scene.addItem(node)
+        self._overlay_node = node
+        
+        node_w = node.rect().width()
+        node_h = node.rect().height()
+        gap = 20
+        call_x = node_w + gap
+        y_pos = 0
+        max_call_w = 0
+        call_list = viz.calls_with_args.get(name, [])
+        calls_by_callee = defaultdict(list)
+        for callee, args in call_list:
+            calls_by_callee[callee].append(args)
+        for callee_name, args_list in calls_by_callee.items():
+            call_rect = FunctionCallRectangle(name, callee_name, args_list, call_x, y_pos)
+            self._scene.addItem(call_rect)
+            self._overlay_call_rects.append(call_rect)
+            max_call_w = max(max_call_w, call_rect.rect().width())
+            y_pos += call_rect.rect().height() + 10
+        
+        self._scene.setSceneRect(self._scene.itemsBoundingRect())
+        padding = 24
+        if self._overlay_call_rects:
+            required_w = int(node_w + gap + max_call_w + padding)
+        else:
+            required_w = int(node_w + padding)
+        required_w = max(required_w, self.DEFAULT_WIDTH)
+        self.setFixedWidth(required_w)
+        self.overlay_resized.emit()
+        self.show()
+    
+    def clear(self):
+        self._clear_scene()
+        self.hide()
+    
+    def eventFilter(self, obj, event):
+        if obj is self._view and event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self.overlay_clicked.emit()
+        return super().eventFilter(obj, event)
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.overlay_clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ViewContainerWidget(QWidget):
+    """Holds the graph view and the right-side overlay, tied to viewport."""
+    
+    def __init__(self, view, overlay, parent=None):
+        super().__init__(parent)
+        self._view = view
+        self._overlay = overlay
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(view)
+        overlay.setParent(self)
+        overlay.raise_()
+        overlay.overlay_resized.connect(self._update_overlay_geometry)
+    
+    def _update_overlay_geometry(self):
+        w, h = self.width(), self.height()
+        ow = self._overlay.width()
+        self._overlay.setGeometry(w - ow, 0, ow, h)
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_overlay_geometry()
 
 
 class CallGraphVisualizer(QMainWindow):
@@ -1218,6 +1339,7 @@ class CallGraphVisualizer(QMainWindow):
         self.selected_file_filter = None  # Currently selected file for filtering (None = show all)
         self.current_path = None  # Store current file/directory path for reloading
         self.compiler = 'gcc'  # Default compiler choice
+        self.overlay_node_name = None  # name of function shown in right overlay, or None
         self.init_ui()
         
         # Load file if provided
@@ -1306,12 +1428,34 @@ class CallGraphVisualizer(QMainWindow):
         
         right_layout.addLayout(control_layout)
         
-        # Graphics view
+        # Graphics view with right-side overlay (viewport-fixed)
         self.scene = QGraphicsScene()
         self.view = PanGraphicsView(self.scene)
-        right_layout.addWidget(self.view)
+        self.overlay = NodeDetailOverlay()
+        self.overlay.set_visualizer(self)
+        self.view_container = ViewContainerWidget(self.view, self.overlay)
+        right_layout.addWidget(self.view_container)
+        
+        self.view.node_left_clicked.connect(self.on_node_left_clicked)
+        self.view.background_left_clicked.connect(self.clear_overlay)
+        self.overlay.overlay_clicked.connect(self.clear_overlay)
         
         main_layout.addWidget(right_widget)
+    
+    def on_node_left_clicked(self, node):
+        """Show node and its callee rectangles in the right overlay."""
+        self.overlay_node_name = node.name
+        self.overlay.set_node(node)
+    
+    def clear_overlay(self):
+        """Clear the right-side overlay."""
+        self.overlay_node_name = None
+        self.overlay.clear()
+    
+    def refresh_overlay_if_showing(self, node):
+        """Refresh overlay content when node toggles C/assembly, if it's the displayed node."""
+        if self.overlay_node_name == node.name and self.overlay.isVisible():
+            self.overlay.set_node(node)
     
     def load_file(self, path):
         """
@@ -2184,6 +2328,7 @@ class CallGraphVisualizer(QMainWindow):
     
     def draw_graph(self):
         """Draw the call graph."""
+        self.clear_overlay()
         self.scene.clear()
         self.nodes = {}
         self.edges = []
@@ -2214,9 +2359,10 @@ class CallGraphVisualizer(QMainWindow):
             signature = info.get('signature', f"{func_name}()")
             assembly = info.get('assembly', "Assembly unavailable")
             
-            # Pass call graph information to the node
+            # Pass call graph information to the node; on_toggle refreshes overlay if shown
             node = FunctionNode(func_name, signature, assembly, 0, 0, 
-                              calls=self.calls, function_info=self.function_info)
+                              calls=self.calls, function_info=self.function_info,
+                              on_toggle_cb=lambda n: self.refresh_overlay_if_showing(n))
             self.nodes[func_name] = node
             self.scene.addItem(node)
         
