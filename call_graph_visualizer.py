@@ -1339,6 +1339,7 @@ class CallGraphVisualizer(QMainWindow):
         self.selected_file_filter = None  # Currently selected file for filtering (None = show all)
         self.current_path = None  # Store current file/directory path for reloading
         self.compiler = 'gcc'  # Default compiler choice
+        self.optimization = 'O0'  # Default optimization level
         self.overlay_node_name = None  # name of function shown in right overlay, or None
         self.init_ui()
         
@@ -1416,10 +1417,22 @@ class CallGraphVisualizer(QMainWindow):
         compiler_label = QLabel("Compiler:")
         control_layout.addWidget(compiler_label)
         self.compiler_combo = QComboBox()
-        self.compiler_combo.addItems(['gcc', 'clang'])
+        self.compiler_combo.addItems(['gcc', 'clang', '@c-compiler'])
         self.compiler_combo.setCurrentText(self.compiler)
         self.compiler_combo.currentTextChanged.connect(self.on_compiler_changed)
         control_layout.addWidget(self.compiler_combo)
+        
+        # Optimization selection dropdown
+        optimization_label = QLabel("Optimization:")
+        control_layout.addWidget(optimization_label)
+        self.optimization_combo = QComboBox()
+        self.optimization_combo.addItems(['O0', 'O1', 'O2', 'O3', 'Os', 'Ofast'])
+        self.optimization_combo.setCurrentText(self.optimization)
+        self.optimization_combo.currentTextChanged.connect(self.on_optimization_changed)
+        control_layout.addWidget(self.optimization_combo)
+        # Disable optimization dropdown when @c-compiler is selected
+        if self.compiler == '@c-compiler':
+            self.optimization_combo.setEnabled(False)
         
         control_layout.addStretch()
         
@@ -1561,7 +1574,7 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract function signatures and assembly
             if c_filenames:
-                self.function_info = get_function_info(c_filenames, self.functions, assembly_files, compiler=self.compiler)
+                self.function_info = get_function_info(c_filenames, self.functions, assembly_files, compiler=self.compiler, optimization=self.optimization)
             else:
                 # Assembly-only mode - create minimal function_info
                 self.function_info = {}
@@ -1668,8 +1681,20 @@ class CallGraphVisualizer(QMainWindow):
     def on_compiler_changed(self, compiler):
         """Handle compiler dropdown change - reload the current file if one is loaded."""
         self.compiler = compiler
+        # Enable/disable optimization dropdown based on compiler
+        if compiler == '@c-compiler':
+            self.optimization_combo.setEnabled(False)
+        else:
+            self.optimization_combo.setEnabled(True)
         if self.current_path:
             # Reload the file with the new compiler
+            self.load_file(self.current_path)
+    
+    def on_optimization_changed(self, optimization):
+        """Handle optimization dropdown change - reload the current file if one is loaded."""
+        self.optimization = optimization
+        if self.current_path:
+            # Reload the file with the new optimization level
             self.load_file(self.current_path)
     
     def clear_graph(self):

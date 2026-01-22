@@ -123,7 +123,178 @@ def parse_assembly_file(asm_filename):
     return function_assemblies
 
 
-def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None, compiler='gcc'):
+def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assemblies=None):
+    """
+    Extract assembly code using the custom c-compiler.
+    The c-compiler outputs NASM format (.asm files) with FUNC_ prefix for function names.
+    
+    Args:
+        c_filenames: List of C source file paths
+        function_names: List of function names to extract
+        existing_assemblies: Dictionary of already extracted assemblies to merge with
+        
+    Returns:
+        dict: function_name -> assembly code string
+    """
+    if existing_assemblies is None:
+        existing_assemblies = {}
+    
+    function_assemblies = existing_assemblies.copy()
+    
+    # Create a temporary directory for assembly output
+    temp_dir = tempfile.mkdtemp()
+    asm_files = []
+    
+    try:
+        # Get the path to the c-compiler script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        compiler_script = os.path.join(script_dir, 'c-compiler', 'compiler.py')
+        
+        if not os.path.exists(compiler_script):
+            print(f"Warning: c-compiler not found at {compiler_script}", file=sys.stderr)
+            for name in function_names:
+                if name not in function_assemblies:
+                    function_assemblies[name] = "c-compiler not found"
+            return function_assemblies
+        
+        # Compile each C file separately to assembly
+        for c_file in c_filenames:
+            base_name = os.path.basename(c_file)
+            asm_file = os.path.join(temp_dir, base_name + '.asm')
+            asm_files.append(asm_file)
+            
+            # Call the c-compiler to generate assembly
+            result = subprocess.run(
+                [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble'],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=os.path.dirname(compiler_script)  # Run from c-compiler directory
+            )
+            
+            if result.returncode != 0:
+                print(f"Warning: c-compiler failed for {c_file}: {result.stderr}", file=sys.stderr)
+                # Continue with other files even if one fails
+        
+        # Parse NASM format assembly files
+        for asm_file in asm_files:
+            if not os.path.exists(asm_file):
+                continue
+                
+            try:
+                with open(asm_file, 'r') as f:
+                    assembly_content = f.read()
+            except Exception as e:
+                print(f"Warning: Failed to read {asm_file}: {e}", file=sys.stderr)
+                continue
+            
+            # Parse NASM format - functions are labeled as FUNC_functionname:
+            for func_name in function_names:
+                if func_name in function_assemblies:
+                    continue  # Already found
+                
+                # Look for FUNC_functionname: label (NASM format)
+                nasm_label = f'FUNC_{func_name}:'
+                func_label_patterns = [
+                    rf'^\s*{re.escape(nasm_label)}',  # FUNC_functionname:
+                    rf'^\s*{re.escape(func_name)}:',   # Also try without FUNC_ prefix
+                ]
+                
+                label_match = None
+                start_pos = -1
+                for pattern in func_label_patterns:
+                    match = re.search(pattern, assembly_content, re.MULTILINE)
+                    if match:
+                        label_match = match
+                        start_pos = match.start()
+                        break
+                
+                if start_pos == -1:
+                    continue  # Function not found in this file
+                
+                # Extract function body (NASM format)
+                remaining = assembly_content[start_pos:]
+                lines = remaining.split('\n')
+                
+                func_lines = []
+                found_label = False
+                collecting = False
+                
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    
+                    if not found_label:
+                        # Look for the function label
+                        if nasm_label in line or f'{func_name}:' in line:
+                            found_label = True
+                            collecting = True
+                            func_lines.append(line)
+                            continue
+                    elif collecting:
+                        # Stop conditions for NASM format:
+                        # 1. Next function label (FUNC_ prefix or regular label, but not local labels)
+                        if re.match(r'^\s*\w+:', line):
+                            label_text = stripped.split(':')[0].strip()
+                            # Skip if it's the same function label (could be a duplicate)
+                            if label_text == nasm_label.replace(':', '') or label_text == func_name:
+                                func_lines.append(line)
+                                continue
+                            # Check if it's a different function (not a local label)
+                            if not label_text.startswith('.L') and label_text != nasm_label.replace(':', '') and label_text != func_name:
+                                break
+                        
+                        # 2. Section changes (but allow SECTION .text at the start)
+                        if stripped.startswith('SECTION ') or stripped.startswith('section '):
+                            if i > 5:  # Only break if we're well into the function
+                                break
+                        
+                        # 3. End of meaningful code (but allow these at the start)
+                        if (stripped.startswith('BITS ') or 
+                            (stripped.startswith('GLOBAL ') and nasm_label not in line and i > 5)):
+                            break
+                        
+                        func_lines.append(line)
+                
+                if func_lines:
+                    func_asm = '\n'.join(func_lines)
+                    # Clean up: remove excessive empty lines
+                    func_asm = re.sub(r'\n\n\n+', '\n\n', func_asm)
+                    function_assemblies[func_name] = func_asm.strip()
+        
+        # Mark missing functions
+        for name in function_names:
+            if name not in function_assemblies:
+                function_assemblies[name] = f"; {name} not found in c-compiler output"
+        
+        return function_assemblies
+        
+    except subprocess.TimeoutExpired:
+        print(f"Warning: c-compiler timed out", file=sys.stderr)
+        for name in function_names:
+            if name not in function_assemblies:
+                function_assemblies[name] = "Assembly extraction timed out"
+        return function_assemblies
+    except Exception as e:
+        print(f"Warning: Failed to extract assembly with c-compiler: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        for name in function_names:
+            if name not in function_assemblies:
+                function_assemblies[name] = f"Assembly unavailable: {str(e)}"
+        return function_assemblies
+    finally:
+        # Clean up temporary files
+        try:
+            for asm_file in asm_files:
+                if os.path.exists(asm_file):
+                    os.remove(asm_file)
+            if os.path.exists(temp_dir):
+                os.rmdir(temp_dir)
+        except:
+            pass
+
+
+def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None, compiler='gcc', optimization='O0'):
     """
     Extract assembly code for specific functions from one or more C files.
     Optionally also include functions from assembly files.
@@ -132,7 +303,8 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
         c_filenames: Path to C source file(s) - can be a single string or list
         function_names: List of function names to extract
         assembly_files: Optional list of assembly file paths to also parse
-        compiler: Compiler to use ('gcc' or 'clang'), default is 'gcc'
+        compiler: Compiler to use ('gcc', 'clang', or '@c-compiler'), default is 'gcc'
+        optimization: Optimization level ('O0', 'O1', 'O2', 'O3', 'Os', 'Ofast'), default is 'O0'
         
     Returns:
         dict: function_name -> assembly code string
@@ -161,6 +333,10 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
     if not remaining_functions or not c_filenames:
         return function_assemblies
     
+    # Handle @c-compiler separately
+    if compiler == '@c-compiler':
+        return extract_assembly_with_c_compiler(c_filenames, remaining_functions, function_assemblies)
+    
     # Create a temporary directory for assembly output
     temp_dir = tempfile.mkdtemp()
     asm_files = []  # Track all generated assembly files for cleanup
@@ -178,8 +354,10 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
             # Compile this C file to assembly
             # Define GCC so that #ifdef GCC code will run (for both gcc and clang for compatibility)
             compiler_cmd = compiler if compiler in ['gcc', 'clang'] else 'gcc'
+            # Build command with optimization flag (only for gcc/clang, not @c-compiler)
+            cmd = [compiler_cmd, '-S', '-DGCC', f'-{optimization}', '-o', asm_file, c_file]
             result = subprocess.run(
-                [compiler_cmd, '-S', '-DGCC', '-o', asm_file, c_file],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -373,7 +551,7 @@ def extract_function_c_code(func_def_node):
     return c_code
 
 
-def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler='gcc'):
+def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler='gcc', optimization='O0'):
     """
     Get function signatures, assembly, and C code for all functions.
     Supports multiple C files and assembly files.
@@ -382,7 +560,8 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler
         c_filenames: Path to C source file(s) - can be a single string or list
         functions_dict: Dictionary of function_name -> FuncDef node
         assembly_files: Optional list of assembly file paths to also parse
-        compiler: Compiler to use ('gcc' or 'clang'), default is 'gcc'
+        compiler: Compiler to use ('gcc', 'clang', or '@c-compiler'), default is 'gcc'
+        optimization: Optimization level ('O0', 'O1', 'O2', 'O3', 'Os', 'Ofast'), default is 'O0'
     
     Returns:
         dict: function_name -> {'signature': str, 'assembly': str, 'c_code': str}
@@ -410,7 +589,7 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler
     
     # Extract assembly for all functions at once
     function_names = list(functions_dict.keys())
-    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files, compiler=compiler)
+    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files, compiler=compiler, optimization=optimization)
     
     # Combine signatures, assembly, and C code
     for func_name in function_names:
