@@ -1344,9 +1344,9 @@ class CallGraphVisualizer(QMainWindow):
                 assembly_files = asm_files
                 self.current_filename = path
                 display_name = os.path.basename(os.path.abspath(path))
-                # Enable directory mode if we have multiple C files
-                self.is_directory_mode = len(c_filenames) > 1
-                self.directory_c_files = c_filenames if self.is_directory_mode else []
+                # Enable directory mode when a directory is passed
+                self.is_directory_mode = True
+                self.directory_c_files = c_filenames
                 self.selected_file_filter = None  # Reset filter
             elif isinstance(path, list):
                 # It's a list of files
@@ -2113,7 +2113,7 @@ class CallGraphVisualizer(QMainWindow):
     
     def update_file_selection_tab(self):
         """Add or remove the file selection tab based on directory mode."""
-        if self.is_directory_mode and len(self.directory_c_files) > 1:
+        if self.is_directory_mode and len(self.directory_c_files) > 0:
             # Add file selection tab if it doesn't exist
             if self.file_selection_tab_index < 0:
                 # Insert at the beginning
@@ -3031,6 +3031,9 @@ class CallGraphVisualizer(QMainWindow):
             max_level_height = max(max_level_height, total_height)
         
         # Position nodes level by level, ensuring equal spacing from right edge to left edge
+        # Store node positions as we go for centering callees with callers
+        node_positions = {}  # node_name -> (x, y) position
+        
         current_x = start_x
         for level in sorted(nodes_by_level.keys()):
             level_nodes = nodes_by_level[level]
@@ -3044,15 +3047,46 @@ class CallGraphVisualizer(QMainWindow):
             total_height = sum(self.nodes[node].rect().height() for node in level_nodes_sorted)
             total_height += vertical_padding * (len(level_nodes_sorted) - 1)
             
-            # Center this level vertically (optional, or just start from top)
-            # For more horizontal layout, start all levels from the same Y
-            current_y = start_y
+            # Determine starting Y position for this level
+            if level == 0:
+                # Root level: start from top
+                current_y = start_y
+            else:
+                # For subsequent levels, center callees with their callers
+                # Find all callers in the previous level that call nodes in this level
+                prev_level = level - 1
+                caller_centers = set()  # Use set to avoid duplicates
+                
+                for caller_name in nodes_by_level.get(prev_level, []):
+                    # Check if this caller calls any node in the current level
+                    callees = outgoing_edges.get(caller_name, set())
+                    # Check if any of the caller's callees are in the current level
+                    callees_in_level = [callee for callee in callees if callee in level_nodes]
+                    if callees_in_level:
+                        # Get the caller's position - use actual node position for accuracy
+                        caller_node = self.nodes[caller_name]
+                        caller_rect = caller_node.rect()
+                        caller_pos = caller_node.pos()
+                        caller_y = caller_pos.y()
+                        # Calculate center Y of the caller node
+                        caller_center_y = caller_y + caller_rect.height() / 2
+                        caller_centers.add(caller_center_y)
+                
+                if caller_centers:
+                    # Center the callees with the average center Y of their callers
+                    target_center_y = sum(caller_centers) / len(caller_centers)
+                    # Position nodes so their center aligns with target_center_y
+                    current_y = target_center_y - total_height / 2
+                else:
+                    # No callers found, fall back to top alignment
+                    current_y = start_y
             
             # Position each node in this level
             for node_name in level_nodes_sorted:
                 node = self.nodes[node_name]
                 node_rect = node.rect()
                 node.setPos(x, current_y)
+                node_positions[node_name] = (x, current_y)
                 current_y += node_rect.height() + vertical_padding
             
             # Update current_x for next level: right edge of current level + padding
