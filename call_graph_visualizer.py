@@ -7,7 +7,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QLabel,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem,
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsPathItem, QMessageBox,
-                             QScrollArea, QTextEdit, QTabWidget, QTabBar, QListWidget, QStackedWidget)
+                             QScrollArea, QTextEdit, QTabWidget, QTabBar, QListWidget, QStackedWidget,
+                             QComboBox)
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor, QPainter, QPainterPath, QMouseEvent, QWheelEvent
 from PyQt5.QtWidgets import QGraphicsSceneMouseEvent
@@ -1215,6 +1216,8 @@ class CallGraphVisualizer(QMainWindow):
         self.directory_c_files = []  # List of C files when directory is loaded
         self.is_directory_mode = False  # Whether we're in directory mode
         self.selected_file_filter = None  # Currently selected file for filtering (None = show all)
+        self.current_path = None  # Store current file/directory path for reloading
+        self.compiler = 'gcc'  # Default compiler choice
         self.init_ui()
         
         # Load file if provided
@@ -1287,6 +1290,15 @@ class CallGraphVisualizer(QMainWindow):
         self.open_button.clicked.connect(self.open_file)
         control_layout.addWidget(self.open_button)
         
+        # Compiler selection dropdown
+        compiler_label = QLabel("Compiler:")
+        control_layout.addWidget(compiler_label)
+        self.compiler_combo = QComboBox()
+        self.compiler_combo.addItems(['gcc', 'clang'])
+        self.compiler_combo.setCurrentText(self.compiler)
+        self.compiler_combo.currentTextChanged.connect(self.on_compiler_changed)
+        control_layout.addWidget(self.compiler_combo)
+        
         control_layout.addStretch()
         
         self.status_label = QLabel("No file loaded")
@@ -1312,6 +1324,9 @@ class CallGraphVisualizer(QMainWindow):
             from call_graph_extractor import extract_call_graph
             from assembly_extractor import get_function_info
             from file_finder import find_source_files, is_source_file_or_directory
+            
+            # Store the current path for reloading when compiler changes
+            self.current_path = path
             
             # Determine if path is a file or directory
             if isinstance(path, str):
@@ -1402,7 +1417,7 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract function signatures and assembly
             if c_filenames:
-                self.function_info = get_function_info(c_filenames, self.functions, assembly_files)
+                self.function_info = get_function_info(c_filenames, self.functions, assembly_files, compiler=self.compiler)
             else:
                 # Assembly-only mode - create minimal function_info
                 self.function_info = {}
@@ -1506,6 +1521,13 @@ class CallGraphVisualizer(QMainWindow):
         if dialog.exec_() == QDialog.Accepted and selected_path:
             self.load_file(selected_path)
     
+    def on_compiler_changed(self, compiler):
+        """Handle compiler dropdown change - reload the current file if one is loaded."""
+        self.compiler = compiler
+        if self.current_path:
+            # Reload the file with the new compiler
+            self.load_file(self.current_path)
+    
     def clear_graph(self):
         """Clear the current graph."""
         self.scene.clear()
@@ -1527,6 +1549,7 @@ class CallGraphVisualizer(QMainWindow):
         self.is_directory_mode = False
         self.directory_c_files = []
         self.selected_file_filter = None
+        self.current_path = None
         # Update tabs (remove file selection tab if it exists)
         self.update_file_selection_tab()
         # Update display based on current tab

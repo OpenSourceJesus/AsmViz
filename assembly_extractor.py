@@ -123,7 +123,7 @@ def parse_assembly_file(asm_filename):
     return function_assemblies
 
 
-def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None):
+def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None, compiler='gcc'):
     """
     Extract assembly code for specific functions from one or more C files.
     Optionally also include functions from assembly files.
@@ -132,6 +132,7 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
         c_filenames: Path to C source file(s) - can be a single string or list
         function_names: List of function names to extract
         assembly_files: Optional list of assembly file paths to also parse
+        compiler: Compiler to use ('gcc' or 'clang'), default is 'gcc'
         
     Returns:
         dict: function_name -> assembly code string
@@ -175,16 +176,17 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
             asm_files.append(asm_file)
             
             # Compile this C file to assembly
-            # Define GCC so that #ifdef GCC code will run
+            # Define GCC so that #ifdef GCC code will run (for both gcc and clang for compatibility)
+            compiler_cmd = compiler if compiler in ['gcc', 'clang'] else 'gcc'
             result = subprocess.run(
-                ['gcc', '-S', '-DGCC', '-o', asm_file, c_file],
+                [compiler_cmd, '-S', '-DGCC', '-o', asm_file, c_file],
                 capture_output=True,
                 text=True,
                 timeout=30
             )
             
             if result.returncode != 0:
-                print(f"Warning: gcc failed for {c_file}: {result.stderr}", file=sys.stderr)
+                print(f"Warning: {compiler_cmd} failed for {c_file}: {result.stderr}", file=sys.stderr)
                 # Continue with other files even if one fails
         
         # Combine all assembly files into one
@@ -310,7 +312,7 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
         return function_assemblies
         
     except subprocess.TimeoutExpired:
-        print("Warning: gcc timed out", file=sys.stderr)
+        print(f"Warning: {compiler} timed out", file=sys.stderr)
         for name in remaining_functions:
             if name not in function_assemblies:
                 function_assemblies[name] = "Assembly extraction timed out"
@@ -371,7 +373,7 @@ def extract_function_c_code(func_def_node):
     return c_code
 
 
-def get_function_info(c_filenames, functions_dict, assembly_files=None):
+def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler='gcc'):
     """
     Get function signatures, assembly, and C code for all functions.
     Supports multiple C files and assembly files.
@@ -380,7 +382,8 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None):
         c_filenames: Path to C source file(s) - can be a single string or list
         functions_dict: Dictionary of function_name -> FuncDef node
         assembly_files: Optional list of assembly file paths to also parse
-        
+        compiler: Compiler to use ('gcc' or 'clang'), default is 'gcc'
+    
     Returns:
         dict: function_name -> {'signature': str, 'assembly': str, 'c_code': str}
     """
@@ -407,7 +410,7 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None):
     
     # Extract assembly for all functions at once
     function_names = list(functions_dict.keys())
-    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files)
+    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files, compiler=compiler)
     
     # Combine signatures, assembly, and C code
     for func_name in function_names:
