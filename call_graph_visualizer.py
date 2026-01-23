@@ -1335,6 +1335,7 @@ class CallGraphVisualizer(QMainWindow):
         self.current_data_tab = 0  # 0 = Global Variables, 1 = Structs
         self.function_sources = {}  # function_name -> source file path
         self.directory_c_files = []  # List of C files when directory is loaded
+        self.directory_assembly_files = []  # List of assembly files when directory is loaded
         self.is_directory_mode = False  # Whether we're in directory mode
         self.selected_file_filter = None  # Currently selected file for filtering (None = show all)
         self.current_path = None  # Store current file/directory path for reloading
@@ -1505,6 +1506,7 @@ class CallGraphVisualizer(QMainWindow):
                 # Enable directory mode when a directory is passed
                 self.is_directory_mode = True
                 self.directory_c_files = c_filenames
+                self.directory_assembly_files = assembly_files
                 self.selected_file_filter = None  # Reset filter
                 # Get all subdirectories for include paths
                 include_dirs = get_all_subdirectories(path)
@@ -1517,6 +1519,7 @@ class CallGraphVisualizer(QMainWindow):
                 # Enable directory mode if we have multiple C files
                 self.is_directory_mode = len(c_filenames) > 1
                 self.directory_c_files = c_filenames if self.is_directory_mode else []
+                self.directory_assembly_files = assembly_files if self.is_directory_mode else []
                 self.selected_file_filter = None  # Reset filter
                 # Find common base directory and get all subdirectories
                 if path:
@@ -1538,6 +1541,8 @@ class CallGraphVisualizer(QMainWindow):
                 # Single file mode - disable directory mode
                 self.is_directory_mode = False
                 self.directory_c_files = []
+                self.directory_assembly_files = []
+                self.directory_assembly_files = []
                 self.selected_file_filter = None  # Reset filter
                 # Get directory containing the file and all its subdirectories
                 file_dir = os.path.dirname(os.path.abspath(path))
@@ -1572,10 +1577,9 @@ class CallGraphVisualizer(QMainWindow):
                                        "Only assembly files found. Call graph extraction requires C files. "
                                        "Assembly code will be parsed, but function calls won't be extracted.")
             
-            # For assembly-only files, we need to extract function definitions from assembly
-            # and try to build a minimal call graph
-            if assembly_files and not c_filenames:
-                # Parse assembly files to find function definitions
+            # Extract function definitions from assembly files (non-local labels)
+            # This should happen even when C files are present, to include assembly-only functions
+            if assembly_files:
                 from assembly_extractor import parse_assembly_file
                 for asm_file in assembly_files:
                     asm_functions = parse_assembly_file(asm_file)
@@ -1584,6 +1588,8 @@ class CallGraphVisualizer(QMainWindow):
                         if func_name not in self.functions:
                             # Create a dummy entry - we can't get signature/C code without C source
                             self.functions[func_name] = None
+                            # Track that this function comes from an assembly file
+                            self.function_sources[func_name] = asm_file
             
             # Extract function signatures and assembly
             if c_filenames:
@@ -1591,15 +1597,26 @@ class CallGraphVisualizer(QMainWindow):
             else:
                 # Assembly-only mode - create minimal function_info
                 self.function_info = {}
-                from assembly_extractor import parse_assembly_file
-                for asm_file in assembly_files:
-                    asm_functions = parse_assembly_file(asm_file)
-                    for func_name, asm_code in asm_functions.items():
+            
+            # Add assembly-only functions to function_info (those not found in C files)
+            # Also ensure assembly-only functions have empty c_code to prevent switching
+            from assembly_extractor import parse_assembly_file
+            for asm_file in assembly_files:
+                asm_functions = parse_assembly_file(asm_file)
+                for func_name, asm_code in asm_functions.items():
+                    # Only add if not already in function_info (i.e., assembly-only function)
+                    if func_name not in self.function_info:
                         self.function_info[func_name] = {
                             'signature': f"{func_name}()",
                             'assembly': asm_code,
-                            'c_code': f"{func_name}() {{\n    // C code unavailable (assembly-only)\n}}"
+                            'c_code': ''  # Empty c_code prevents switching to C code
                         }
+            
+            # Ensure all assembly-only functions (those with None in functions dict) have empty c_code
+            for func_name in self.functions.keys():
+                if self.functions.get(func_name) is None and func_name in self.function_info:
+                    # This is an assembly-only function - set c_code to empty
+                    self.function_info[func_name]['c_code'] = ''
             
             # Extract global variables and detect their usage
             if c_filenames:
@@ -1730,6 +1747,7 @@ class CallGraphVisualizer(QMainWindow):
         self.function_sources = {}
         self.is_directory_mode = False
         self.directory_c_files = []
+        self.directory_assembly_files = []
         self.selected_file_filter = None
         self.current_path = None
         # Update tabs (remove file selection tab if it exists)
@@ -2323,7 +2341,7 @@ class CallGraphVisualizer(QMainWindow):
     
     def update_file_selection_tab(self):
         """Add or remove the file selection tab based on directory mode."""
-        if self.is_directory_mode and len(self.directory_c_files) > 0:
+        if self.is_directory_mode and (len(self.directory_c_files) > 0 or len(self.directory_assembly_files) > 0):
             # Add file selection tab if it doesn't exist
             if self.file_selection_tab_index < 0:
                 # Insert at the beginning
@@ -2335,8 +2353,13 @@ class CallGraphVisualizer(QMainWindow):
             # Always update file list when in directory mode (including when switching directories)
             self.file_list_widget.clear()
             self.file_list_widget.addItem("(All Files)")
+            # Add C files
             for c_file in sorted(self.directory_c_files):
                 display_name = os.path.basename(c_file)
+                self.file_list_widget.addItem(display_name)
+            # Add assembly files
+            for asm_file in sorted(self.directory_assembly_files):
+                display_name = os.path.basename(asm_file)
                 self.file_list_widget.addItem(display_name)
             self._highlight_selected_file()
         else:
@@ -2376,11 +2399,17 @@ class CallGraphVisualizer(QMainWindow):
         if selected_text == "(All Files)":
             self.selected_file_filter = None
         else:
-            # Find the full path of the selected file
+            # Find the full path of the selected file (check both C and assembly files)
             for c_file in self.directory_c_files:
                 if os.path.basename(c_file) == selected_text:
                     self.selected_file_filter = c_file
                     break
+            if not self.selected_file_filter or os.path.basename(self.selected_file_filter) != selected_text:
+                # Check assembly files if not found in C files
+                for asm_file in self.directory_assembly_files:
+                    if os.path.basename(asm_file) == selected_text:
+                        self.selected_file_filter = asm_file
+                        break
         
         # Highlight the selected item
         self._highlight_selected_file()
