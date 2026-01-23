@@ -107,16 +107,20 @@ class CallGraphExtractor:
         self.current_function = None  # Track current function context
         self.function_sources = {}  # function_name -> source file path
         
-    def extract(self, filenames):
+    def extract(self, filenames, include_dirs=None):
         """
         Extract call graph from one or more C files.
         
         Args:
             filenames: Path to a C source file, or list of paths to C source files
+            include_dirs: Optional list of include directories to add with -I flags
             
         Returns:
             tuple: (functions dict, calls dict)
         """
+        if include_dirs is None:
+            include_dirs = []
+        
         # Convert single filename to list for uniform handling
         if isinstance(filenames, str):
             filenames = [filenames]
@@ -167,6 +171,9 @@ class CallGraphExtractor:
                 '-I' + fake_libc_include,
                 '-nostdinc',  # Don't use system headers - this is critical!
             ])
+            # Add user-provided include directories
+            for include_dir in include_dirs:
+                cpp_args.extend(['-I', include_dir])
         else:
             # Create minimal fake stddef.h and use it to avoid system header conflicts
             fake_stddef = _create_fake_stddef_header()
@@ -177,10 +184,17 @@ class CallGraphExtractor:
                     '-nostdinc',  # Don't use system headers
                     # Create a wrapper that redirects stddef.h to our fake version
                 ])
+                # Add user-provided include directories
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
                 # Create a symlink or wrapper for stddef.h
                 # Actually, we can't easily redirect system headers without more complex setup
                 # So we'll rely on the -include approach and hope the source files
                 # don't directly include system headers
+            else:
+                # No fake headers - add user-provided include directories anyway
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
             # Note: Without fake headers, we can't use -nostdinc because
             # the source files might need some system definitions
             # So we'll try to make our __attribute__ definition work with system headers
@@ -286,12 +300,13 @@ class CallGraphExtractor:
         return ", ".join(args_list)
 
 
-def extract_call_graph(filenames):
+def extract_call_graph(filenames, include_dirs=None):
     """
     Convenience function to extract call graph from one or more C files.
     
     Args:
         filenames: Path to a C source file, or list of paths to C source files
+        include_dirs: Optional list of include directories to add with -I flags
         
     Returns:
         tuple: (functions dict, calls dict, calls_with_args dict, function_sources dict)
@@ -301,4 +316,4 @@ def extract_call_graph(filenames):
         - function_sources: function_name -> source file path
     """
     extractor = CallGraphExtractor()
-    return extractor.extract(filenames)
+    return extractor.extract(filenames, include_dirs=include_dirs)

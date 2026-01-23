@@ -11,6 +11,37 @@ import re
 import sys
 
 
+def get_all_subdirectories(directory):
+    """
+    Get all subdirectories of a directory recursively.
+    
+    Args:
+        directory: Path to the directory
+        
+    Returns:
+        list: List of all subdirectory paths (including the directory itself)
+    """
+    if not os.path.isdir(directory):
+        return []
+    
+    subdirs = [os.path.abspath(directory)]  # Include the directory itself
+    
+    try:
+        for root, dirs, files in os.walk(directory):
+            # Skip hidden directories (starting with .)
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for d in dirs:
+                subdir_path = os.path.join(root, d)
+                if os.path.isdir(subdir_path):
+                    abs_path = os.path.abspath(subdir_path)
+                    if abs_path not in subdirs:
+                        subdirs.append(abs_path)
+    except Exception as e:
+        print(f"Warning: Error finding subdirectories in {directory}: {e}", file=sys.stderr)
+    
+    return subdirs
+
+
 def extract_function_signature(func_def_node):
     """
     Extract function signature from a FuncDef AST node.
@@ -123,7 +154,7 @@ def parse_assembly_file(asm_filename):
     return function_assemblies
 
 
-def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assemblies=None):
+def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assemblies=None, include_dirs=None):
     """
     Extract assembly code using the custom c-compiler.
     The c-compiler outputs NASM format (.asm files) with FUNC_ prefix for function names.
@@ -132,12 +163,16 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
         c_filenames: List of C source file paths
         function_names: List of function names to extract
         existing_assemblies: Dictionary of already extracted assemblies to merge with
+        include_dirs: Optional list of include directories to add with -I flags
         
     Returns:
         dict: function_name -> assembly code string
     """
     if existing_assemblies is None:
         existing_assemblies = {}
+    
+    if include_dirs is None:
+        include_dirs = []
     
     function_assemblies = existing_assemblies.copy()
     
@@ -163,9 +198,15 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
             asm_file = os.path.join(temp_dir, base_name + '.asm')
             asm_files.append(asm_file)
             
+            # Build command with include directories
+            cmd = [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble']
+            if include_dirs:
+                for include_dir in include_dirs:
+                    cmd.extend(['-I', include_dir])
+            
             # Call the c-compiler to generate assembly
             result = subprocess.run(
-                [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble'],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -294,7 +335,7 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
             pass
 
 
-def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None, compiler='gcc', optimization='O0'):
+def extract_assembly_for_functions(c_filenames, function_names, assembly_files=None, compiler='gcc', optimization='O0', include_dirs=None):
     """
     Extract assembly code for specific functions from one or more C files.
     Optionally also include functions from assembly files.
@@ -305,10 +346,13 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
         assembly_files: Optional list of assembly file paths to also parse
         compiler: Compiler to use ('gcc', 'clang', or '@c-compiler'), default is 'gcc'
         optimization: Optimization level ('O0', 'O1', 'O2', 'O3', 'Os', 'Ofast'), default is 'O0'
+        include_dirs: Optional list of include directories to add with -I flags
         
     Returns:
         dict: function_name -> assembly code string
     """
+    if include_dirs is None:
+        include_dirs = []
     if not function_names:
         return {}
     
@@ -335,7 +379,7 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
     
     # Handle @c-compiler separately
     if compiler == '@c-compiler':
-        return extract_assembly_with_c_compiler(c_filenames, remaining_functions, function_assemblies)
+        return extract_assembly_with_c_compiler(c_filenames, remaining_functions, function_assemblies, include_dirs=include_dirs)
     
     # Create a temporary directory for assembly output
     temp_dir = tempfile.mkdtemp()
@@ -356,6 +400,10 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
             compiler_cmd = compiler if compiler in ['gcc', 'clang'] else 'gcc'
             # Build command with optimization flag (only for gcc/clang, not @c-compiler)
             cmd = [compiler_cmd, '-S', '-DGCC', f'-{optimization}', '-o', asm_file, c_file]
+            # Add include directories
+            if include_dirs:
+                for include_dir in include_dirs:
+                    cmd.extend(['-I', include_dir])
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -551,7 +599,7 @@ def extract_function_c_code(func_def_node):
     return c_code
 
 
-def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler='gcc', optimization='O0'):
+def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler='gcc', optimization='O0', include_dirs=None):
     """
     Get function signatures, assembly, and C code for all functions.
     Supports multiple C files and assembly files.
@@ -562,10 +610,13 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler
         assembly_files: Optional list of assembly file paths to also parse
         compiler: Compiler to use ('gcc', 'clang', or '@c-compiler'), default is 'gcc'
         optimization: Optimization level ('O0', 'O1', 'O2', 'O3', 'Os', 'Ofast'), default is 'O0'
+        include_dirs: Optional list of include directories to add with -I flags
     
     Returns:
         dict: function_name -> {'signature': str, 'assembly': str, 'c_code': str}
     """
+    if include_dirs is None:
+        include_dirs = []
     function_info = {}
     
     # Extract signatures and C code
@@ -589,7 +640,7 @@ def get_function_info(c_filenames, functions_dict, assembly_files=None, compiler
     
     # Extract assembly for all functions at once
     function_names = list(functions_dict.keys())
-    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files, compiler=compiler, optimization=optimization)
+    assemblies = extract_assembly_for_functions(c_filenames, function_names, assembly_files, compiler=compiler, optimization=optimization, include_dirs=include_dirs)
     
     # Combine signatures, assembly, and C code
     for func_name in function_names:

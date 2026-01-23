@@ -1479,7 +1479,7 @@ class CallGraphVisualizer(QMainWindow):
         """
         try:
             from call_graph_extractor import extract_call_graph
-            from assembly_extractor import get_function_info
+            from assembly_extractor import get_function_info, get_all_subdirectories
             from file_finder import find_source_files, is_source_file_or_directory
             
             # Store the current path for reloading when compiler changes
@@ -1493,6 +1493,7 @@ class CallGraphVisualizer(QMainWindow):
             
             c_filenames = []
             assembly_files = []
+            include_dirs = []  # List of include directories to pass to compilers
             
             if path_obj.is_dir() or (isinstance(path, str) and os.path.isdir(path)):
                 # It's a directory - find all source files
@@ -1505,6 +1506,8 @@ class CallGraphVisualizer(QMainWindow):
                 self.is_directory_mode = True
                 self.directory_c_files = c_filenames
                 self.selected_file_filter = None  # Reset filter
+                # Get all subdirectories for include paths
+                include_dirs = get_all_subdirectories(path)
             elif isinstance(path, list):
                 # It's a list of files
                 c_filenames = [f for f in path if f.endswith('.c')]
@@ -1515,6 +1518,12 @@ class CallGraphVisualizer(QMainWindow):
                 self.is_directory_mode = len(c_filenames) > 1
                 self.directory_c_files = c_filenames if self.is_directory_mode else []
                 self.selected_file_filter = None  # Reset filter
+                # Find common base directory and get all subdirectories
+                if path:
+                    # Get the common directory containing all files
+                    common_dir = os.path.commonpath([os.path.abspath(f) for f in path])
+                    if os.path.isdir(common_dir):
+                        include_dirs = get_all_subdirectories(common_dir)
             else:
                 # Single file - check if it's a C file or assembly file
                 if path.endswith('.c'):
@@ -1530,6 +1539,10 @@ class CallGraphVisualizer(QMainWindow):
                 self.is_directory_mode = False
                 self.directory_c_files = []
                 self.selected_file_filter = None  # Reset filter
+                # Get directory containing the file and all its subdirectories
+                file_dir = os.path.dirname(os.path.abspath(path))
+                if file_dir and os.path.isdir(file_dir):
+                    include_dirs = get_all_subdirectories(file_dir)
             
             if not c_filenames and not assembly_files:
                 QMessageBox.warning(self, "No Files", 
@@ -1539,7 +1552,7 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract call graph from C files
             if c_filenames:
-                result = extract_call_graph(c_filenames)
+                result = extract_call_graph(c_filenames, include_dirs=include_dirs)
                 if len(result) == 4:
                     self.functions, self.calls, self.calls_with_args, self.function_sources = result
                 elif len(result) == 3:
@@ -1574,7 +1587,7 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract function signatures and assembly
             if c_filenames:
-                self.function_info = get_function_info(c_filenames, self.functions, assembly_files, compiler=self.compiler, optimization=self.optimization)
+                self.function_info = get_function_info(c_filenames, self.functions, assembly_files, compiler=self.compiler, optimization=self.optimization, include_dirs=include_dirs)
             else:
                 # Assembly-only mode - create minimal function_info
                 self.function_info = {}
@@ -1590,14 +1603,14 @@ class CallGraphVisualizer(QMainWindow):
             
             # Extract global variables and detect their usage
             if c_filenames:
-                self.global_variables = self.extract_global_variables(c_filenames)
+                self.global_variables = self.extract_global_variables(c_filenames, include_dirs=include_dirs)
                 if self.global_variables and self.function_info:
                     self.global_var_usage = self.detect_global_usage_in_assembly(
                         self.global_variables, self.function_info)
                 else:
                     self.global_var_usage = {}
                 # Extract structs
-                self.structs = self.extract_structs(c_filenames)
+                self.structs = self.extract_structs(c_filenames, include_dirs=include_dirs)
             else:
                 self.global_variables = {}
                 self.global_var_usage = {}
@@ -1728,16 +1741,20 @@ class CallGraphVisualizer(QMainWindow):
             self.data_text.setPlainText(self.structs_content)
         self.status_label.setText("No file loaded")
     
-    def extract_global_variables(self, c_filenames):
+    def extract_global_variables(self, c_filenames, include_dirs=None):
         """
         Extract global variable names and types from C source files.
         
         Args:
             c_filenames: List of C source file paths
+            include_dirs: Optional list of include directories to add with -I flags
             
         Returns:
             dict: Mapping of global variable names to their type strings
         """
+        if include_dirs is None:
+            include_dirs = []
+        
         from pycparser import parse_file, c_ast
         from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
         try:
@@ -1774,6 +1791,9 @@ class CallGraphVisualizer(QMainWindow):
                 '-I' + fake_libc_include,
                 '-nostdinc',
             ])
+            # Add user-provided include directories
+            for include_dir in include_dirs:
+                cpp_args.extend(['-I', include_dir])
         else:
             fake_stddef = _create_fake_stddef_header()
             if fake_stddef:
@@ -1782,6 +1802,13 @@ class CallGraphVisualizer(QMainWindow):
                     '-I' + fake_stddef_dir,
                     '-nostdinc',
                 ])
+                # Add user-provided include directories
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
+            else:
+                # No fake headers - add user-provided include directories anyway
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
         
         cpp_args.extend([
             '-D__volatile__=volatile',
@@ -2038,16 +2065,20 @@ class CallGraphVisualizer(QMainWindow):
         if self.current_data_tab == 0:
             self.data_text.setPlainText(self.globals_content)
     
-    def extract_structs(self, c_filenames):
+    def extract_structs(self, c_filenames, include_dirs=None):
         """
         Extract struct definitions and their members from C source files.
         
         Args:
             c_filenames: List of C source file paths
+            include_dirs: Optional list of include directories to add with -I flags
             
         Returns:
             dict: Mapping of struct names to {'members': [(member_name, member_type), ...]}
         """
+        if include_dirs is None:
+            include_dirs = []
+        
         from pycparser import parse_file, c_ast
         from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
         try:
@@ -2084,6 +2115,9 @@ class CallGraphVisualizer(QMainWindow):
                 '-I' + fake_libc_include,
                 '-nostdinc',
             ])
+            # Add user-provided include directories
+            for include_dir in include_dirs:
+                cpp_args.extend(['-I', include_dir])
         else:
             fake_stddef = _create_fake_stddef_header()
             if fake_stddef:
@@ -2092,6 +2126,13 @@ class CallGraphVisualizer(QMainWindow):
                     '-I' + fake_stddef_dir,
                     '-nostdinc',
                 ])
+                # Add user-provided include directories
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
+            else:
+                # No fake headers - add user-provided include directories anyway
+                for include_dir in include_dirs:
+                    cpp_args.extend(['-I', include_dir])
         
         cpp_args.extend([
             '-D__volatile__=volatile',
@@ -2290,18 +2331,14 @@ class CallGraphVisualizer(QMainWindow):
                 self.file_selection_tab_index = 0
                 self.globals_tab_index = 1
                 self.structs_tab_index = 2
-                
-                # Update file list
-                self.file_list_widget.clear()
-                # Add "All Files" option
-                self.file_list_widget.addItem("(All Files)")
-                # Add each C file
-                for c_file in sorted(self.directory_c_files):
-                    display_name = os.path.basename(c_file)
-                    self.file_list_widget.addItem(display_name)
-                
-                # Highlight the currently selected file (or "All Files" if none selected)
-                self._highlight_selected_file()
+            
+            # Always update file list when in directory mode (including when switching directories)
+            self.file_list_widget.clear()
+            self.file_list_widget.addItem("(All Files)")
+            for c_file in sorted(self.directory_c_files):
+                display_name = os.path.basename(c_file)
+                self.file_list_widget.addItem(display_name)
+            self._highlight_selected_file()
         else:
             # Remove file selection tab if it exists
             if self.file_selection_tab_index >= 0:
