@@ -11,6 +11,31 @@ import re
 import sys
 
 
+def get_fake_libc_include_path():
+    """
+    Get the path to the fake_libc_include directory.
+    
+    Returns:
+        str: Absolute path to fake_libc_include, or None if not found
+    """
+    try:
+        # First try the local fake_libc_include directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        fake_libc_include = os.path.join(script_dir, 'fake_libc_include')
+        if os.path.isdir(fake_libc_include):
+            return os.path.abspath(fake_libc_include)
+        
+        # Fall back to pycparser's fake_libc_include
+        from pycparser import __file__ as pycparser_file
+        pycparser_dir = os.path.dirname(pycparser_file)
+        fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+        if os.path.isdir(fake_libc_include):
+            return os.path.abspath(fake_libc_include)
+    except:
+        pass
+    return None
+
+
 def get_all_subdirectories(directory):
     """
     Get all subdirectories of a directory recursively.
@@ -200,6 +225,10 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
             
             # Build command with include directories
             cmd = [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble']
+            # Add fake_libc_include if available
+            fake_libc_include = get_fake_libc_include_path()
+            if fake_libc_include:
+                cmd.extend(['-I', fake_libc_include])
             if include_dirs:
                 for include_dir in include_dirs:
                     cmd.extend(['-I', include_dir])
@@ -400,6 +429,10 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
             compiler_cmd = compiler if compiler in ['gcc', 'clang'] else 'gcc'
             # Build command with optimization flag (only for gcc/clang, not @c-compiler)
             cmd = [compiler_cmd, '-S', '-DGCC', f'-{optimization}', '-o', asm_file, c_file]
+            # Add fake_libc_include if available
+            fake_libc_include = get_fake_libc_include_path()
+            if fake_libc_include:
+                cmd.extend(['-I', fake_libc_include])
             # Add include directories
             if include_dirs:
                 for include_dir in include_dirs:

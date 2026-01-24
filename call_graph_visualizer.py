@@ -1777,9 +1777,16 @@ class CallGraphVisualizer(QMainWindow):
         from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
         try:
             from pycparser import __file__ as pycparser_file
-            pycparser_dir = os.path.dirname(pycparser_file)
-            fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+            # First try the local fake_libc_include directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            fake_libc_include = os.path.join(script_dir, 'fake_libc_include')
+            if not os.path.isdir(fake_libc_include):
+                # Fall back to pycparser's fake_libc_include
+                pycparser_dir = os.path.dirname(pycparser_file)
+                fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
             FAKE_LIBC_AVAILABLE = os.path.isdir(fake_libc_include)
+            if FAKE_LIBC_AVAILABLE:
+                fake_libc_include = os.path.abspath(fake_libc_include)
         except:
             FAKE_LIBC_AVAILABLE = False
             fake_libc_include = None
@@ -1830,8 +1837,12 @@ class CallGraphVisualizer(QMainWindow):
         
         cpp_args.extend([
             '-D__volatile__=volatile',
+            '-Dvolatile=',
             '-D__restrict=',
             '-D__extension__=',
+            '-Dasm=',
+            '-D__asm=',
+            '-D__asm__=',
             '-D__asm__(x)=',
             '-D__asm(x)=',
             '-D__inline=',
@@ -2101,9 +2112,16 @@ class CallGraphVisualizer(QMainWindow):
         from call_graph_extractor import _create_attribute_fix_header, _create_fake_stddef_header
         try:
             from pycparser import __file__ as pycparser_file
-            pycparser_dir = os.path.dirname(pycparser_file)
-            fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+            # First try the local fake_libc_include directory
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            fake_libc_include = os.path.join(script_dir, 'fake_libc_include')
+            if not os.path.isdir(fake_libc_include):
+                # Fall back to pycparser's fake_libc_include
+                pycparser_dir = os.path.dirname(pycparser_file)
+                fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
             FAKE_LIBC_AVAILABLE = os.path.isdir(fake_libc_include)
+            if FAKE_LIBC_AVAILABLE:
+                fake_libc_include = os.path.abspath(fake_libc_include)
         except:
             FAKE_LIBC_AVAILABLE = False
             fake_libc_include = None
@@ -2154,8 +2172,12 @@ class CallGraphVisualizer(QMainWindow):
         
         cpp_args.extend([
             '-D__volatile__=volatile',
+            '-Dvolatile=',
             '-D__restrict=',
             '-D__extension__=',
+            '-Dasm=',
+            '-D__asm=',
+            '-D__asm__=',
             '-D__asm__(x)=',
             '-D__asm(x)=',
             '-D__inline=',

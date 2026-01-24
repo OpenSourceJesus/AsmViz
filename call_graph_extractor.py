@@ -13,8 +13,15 @@ try:
     from pycparser import __file__ as pycparser_file
     # Try to find fake_libc_include directory
     pycparser_dir = os.path.dirname(pycparser_file)
-    fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
+    # First try the local fake_libc_include directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    fake_libc_include = os.path.join(script_dir, 'fake_libc_include')
+    if not os.path.isdir(fake_libc_include):
+        # Fall back to pycparser's fake_libc_include
+        fake_libc_include = os.path.join(pycparser_dir, 'utils', 'fake_libc_include')
     FAKE_LIBC_AVAILABLE = os.path.isdir(fake_libc_include)
+    if FAKE_LIBC_AVAILABLE:
+        fake_libc_include = os.path.abspath(fake_libc_include)
 except:
     FAKE_LIBC_AVAILABLE = False
     fake_libc_include = None
@@ -202,8 +209,12 @@ class CallGraphExtractor:
         # Additional defines for GCC-specific keywords
         cpp_args.extend([
             '-D__volatile__=volatile',  # Handle __volatile__ keyword
+            '-Dvolatile=',  # Strip volatile to allow inline asm parsing
             '-D__restrict=',  # Remove __restrict__
             '-D__extension__=',  # Remove __extension__
+            '-Dasm=',  # Strip inline asm keyword (GCC extension)
+            '-D__asm=',  # Strip inline asm keyword (alternate spelling)
+            '-D__asm__=',  # Strip inline asm keyword (alternate spelling)
             '-D__asm__(x)=',  # Remove inline assembly attributes
             '-D__asm(x)=',  # Remove inline assembly attributes
             '-D__inline=',  # Handle inline
