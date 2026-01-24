@@ -1851,10 +1851,22 @@ class CallGraphVisualizer(QMainWindow):
             '-D__signed__=signed',
         ])
         
+        from call_graph_extractor import preprocess_file_for_parsing
+        
         for filename in c_filenames:
             try:
-                ast = parse_file(filename, use_cpp=True, cpp_args=cpp_args)
-                self._visit_for_globals(ast, global_vars)
+                # Preprocess file to handle inline assembly
+                preprocessed_file = preprocess_file_for_parsing(filename)
+                try:
+                    ast = parse_file(preprocessed_file, use_cpp=True, cpp_args=cpp_args)
+                    self._visit_for_globals(ast, global_vars)
+                finally:
+                    # Clean up temporary file if it was created
+                    if preprocessed_file != filename and os.path.exists(preprocessed_file):
+                        try:
+                            os.remove(preprocessed_file)
+                        except:
+                            pass
             except Exception as e:
                 print(f"Warning: Error parsing file {filename} for globals: {e}", file=sys.stderr)
         
@@ -2186,10 +2198,22 @@ class CallGraphVisualizer(QMainWindow):
             '-D__signed__=signed',
         ])
         
+        from call_graph_extractor import preprocess_file_for_parsing
+        
         for filename in c_filenames:
             try:
-                ast = parse_file(filename, use_cpp=True, cpp_args=cpp_args)
-                self._visit_for_structs(ast, structs)
+                # Preprocess file to handle inline assembly
+                preprocessed_file = preprocess_file_for_parsing(filename)
+                try:
+                    ast = parse_file(preprocessed_file, use_cpp=True, cpp_args=cpp_args)
+                    self._visit_for_structs(ast, structs)
+                finally:
+                    # Clean up temporary file if it was created
+                    if preprocessed_file != filename and os.path.exists(preprocessed_file):
+                        try:
+                            os.remove(preprocessed_file)
+                        except:
+                            pass
             except Exception as e:
                 print(f"Warning: Error parsing file {filename} for structs: {e}", file=sys.stderr)
         

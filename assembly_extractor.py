@@ -224,7 +224,7 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
             asm_files.append(asm_file)
             
             # Build command with include directories
-            cmd = [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble']
+            cmd = ['/usr/bin/python3', compiler_script, c_file, '-o', asm_file, '--no-assemble']
             # Add fake_libc_include if available
             fake_libc_include = get_fake_libc_include_path()
             if fake_libc_include:

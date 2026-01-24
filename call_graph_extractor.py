@@ -9,6 +9,7 @@ from collections import defaultdict
 import sys
 import os
 import tempfile
+import re
 try:
     from pycparser import __file__ as pycparser_file
     # Try to find fake_libc_include directory
@@ -101,6 +102,208 @@ typedef int wchar_t;
         if os.path.exists(header_path):
             os.remove(header_path)
         return None
+
+
+def preprocess_inline_assembly(content):
+    """
+    Preprocess inline assembly statements to make them parseable by pycparser.
+    Handles all forms including asm volatile("code" ::: "clobbers").
+    
+    Args:
+        content: C source code as string
+        
+    Returns:
+        str: Preprocessed C source code with inline assembly replaced
+    """
+    # Pattern to match inline assembly statements
+    # This handles:
+    # - asm("code");
+    # - asm volatile("code");
+    # - asm("code" : outputs : inputs : clobbers);
+    # - asm volatile("code" : outputs : inputs : clobbers);
+    # - asm("code" ::: "clobbers");  (no outputs, no inputs, just clobbers - note the :::)
+    # - asm volatile("code" ::: "clobbers");
+    
+    # Use a state machine to find and replace asm statements
+    # We need to handle:
+    # 1. asm/__asm__/__asm keyword
+    # 2. Optional volatile
+    # 3. Opening parenthesis
+    # 4. Assembly string (may contain escaped quotes and nested parens)
+    # 5. Closing parenthesis
+    # 6. Optional : outputs
+    # 7. Optional : inputs
+    # 8. Optional : clobbers or ::: clobbers
+    # 9. Semicolon
+    
+    result = []
+    i = 0
+    content_len = len(content)
+    
+    while i < content_len:
+        # Look for asm keyword
+        if (i == 0 or not (content[i-1].isalnum() or content[i-1] == '_')):
+            # Check for __asm__ first (longest match) - note: __asm__ is 7 characters
+            if content[i:i+7] == '__asm__':
+                asm_start = i
+                i += 7
+                # Skip whitespace
+                while i < content_len and content[i].isspace():
+                    i += 1
+                # Check for volatile
+                if i < content_len and content[i:i+8] == 'volatile':
+                    i += 8
+                    while i < content_len and content[i].isspace():
+                        i += 1
+            # Check for __asm (must check before 'asm' to avoid partial match)
+            elif content[i:i+5] == '__asm' and (i+5 >= content_len or not (content[i+5].isalnum() or content[i+5] == '_')):
+                asm_start = i
+                i += 5
+                # Skip whitespace
+                while i < content_len and content[i].isspace():
+                    i += 1
+                # Check for volatile
+                if i < content_len and content[i:i+8] == 'volatile':
+                    i += 8
+                    while i < content_len and content[i].isspace():
+                        i += 1
+            # Check for 'asm' (must be word boundary)
+            elif content[i:i+3] == 'asm' and (i+3 >= content_len or not (content[i+3].isalnum() or content[i+3] == '_')):
+                asm_start = i
+                i += 3
+                # Skip whitespace
+                while i < content_len and content[i].isspace():
+                    i += 1
+                # Check for volatile
+                if i < content_len and content[i:i+8] == 'volatile':
+                    i += 8
+                    while i < content_len and content[i].isspace():
+                        i += 1
+            else:
+                result.append(content[i])
+                i += 1
+                continue
+            
+            # Now we should have an opening parenthesis
+            # If we don't have '(', this wasn't actually an asm statement, so fall through
+            if i < content_len and content[i] == '(':
+                # Find matching closing parenthesis, handling nested parens and strings
+                paren_depth = 1
+                i += 1
+                in_string = False
+                escape_next = False
+                
+                while i < content_len and paren_depth > 0:
+                    if escape_next:
+                        escape_next = False
+                        i += 1
+                        continue
+                    
+                    char = content[i]
+                    
+                    if char == '\\':
+                        escape_next = True
+                        i += 1
+                        continue
+                    
+                    if char == '"':
+                        in_string = not in_string
+                        i += 1
+                        continue
+                    
+                    if not in_string:
+                        if char == '(':
+                            paren_depth += 1
+                        elif char == ')':
+                            paren_depth -= 1
+                    
+                    i += 1
+                
+                # Now look for optional : sections or semicolon
+                while i < content_len:
+                    # Skip whitespace
+                    while i < content_len and content[i].isspace():
+                        i += 1
+                    
+                    if i >= content_len:
+                        break
+                    
+                    # Check for ::: (clobbers only, no outputs/inputs)
+                    if content[i:i+3] == ':::':
+                        i += 3
+                        # Skip until semicolon
+                        while i < content_len and content[i] != ';':
+                            i += 1
+                        break
+                    # Check for : (operands)
+                    elif content[i] == ':':
+                        i += 1
+                        # Skip until next : or ; or end
+                        while i < content_len and content[i] != ':' and content[i] != ';':
+                            i += 1
+                        # If we hit another :, continue to handle it
+                        if i < content_len and content[i] == ':':
+                            continue
+                        # If we hit ;, break
+                        if i < content_len and content[i] == ';':
+                            break
+                    # Check for semicolon
+                    elif content[i] == ';':
+                        i += 1
+                        break
+                    else:
+                        # Unexpected character, break
+                        break
+                
+                # Replace the entire asm statement with a comment
+                result.append('; /* inline assembly removed */')
+                continue
+            else:
+                # No opening parenthesis found, this wasn't an asm statement
+                # Backtrack and append characters normally
+                # We need to go back to where we started matching
+                result.append(content[asm_start])
+                i = asm_start + 1
+                continue
+        
+        result.append(content[i])
+        i += 1
+    
+    return ''.join(result)
+
+
+def preprocess_file_for_parsing(filename):
+    """
+    Preprocess a C file to handle inline assembly before parsing.
+    Creates a temporary file with preprocessed content.
+    
+    Args:
+        filename: Path to the C source file
+        
+    Returns:
+        str: Path to temporary preprocessed file, or original filename if preprocessing fails
+    """
+    try:
+        with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # Preprocess inline assembly
+        preprocessed = preprocess_inline_assembly(content)
+        
+        # Create temporary file
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.c', prefix='pycparser_asm_', text=True)
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                f.write(preprocessed)
+            return temp_path
+        except Exception:
+            os.close(temp_fd)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return filename
+    except Exception:
+        # If preprocessing fails, return original filename
+        return filename
 
 
 class CallGraphExtractor:
@@ -226,7 +429,17 @@ class CallGraphExtractor:
         
         for filename in filenames:
             try:
-                ast = parse_file(filename, use_cpp=True, cpp_args=cpp_args)
+                # Preprocess file to handle inline assembly
+                preprocessed_file = preprocess_file_for_parsing(filename)
+                try:
+                    ast = parse_file(preprocessed_file, use_cpp=True, cpp_args=cpp_args)
+                finally:
+                    # Clean up temporary file if it was created
+                    if preprocessed_file != filename and os.path.exists(preprocessed_file):
+                        try:
+                            os.remove(preprocessed_file)
+                        except:
+                            pass
             except Exception as e:
                 print(f"Warning: Error parsing file {filename}: {e}", file=sys.stderr)
                 continue
