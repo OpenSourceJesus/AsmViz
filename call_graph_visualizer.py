@@ -18,6 +18,9 @@ import math
 from pathlib import Path
 from collections import defaultdict
 
+# Max include dirs passed to cpp to avoid E2BIG (argument list too long)
+MAX_INCLUDE_DIRS = 256
+
 
 class PanGraphicsView(QGraphicsView):
     """Custom QGraphicsView that supports panning with right or middle mouse button only.
@@ -1508,8 +1511,8 @@ class CallGraphVisualizer(QMainWindow):
                 self.directory_c_files = c_filenames
                 self.directory_assembly_files = assembly_files
                 self.selected_file_filter = None  # Reset filter
-                # Get all subdirectories for include paths
-                include_dirs = get_all_subdirectories(path)
+                # Get all subdirectories for include paths (capped to avoid E2BIG)
+                include_dirs = get_all_subdirectories(path)[:MAX_INCLUDE_DIRS]
             elif isinstance(path, list):
                 # It's a list of files
                 c_filenames = [f for f in path if f.endswith('.c')]
@@ -1526,7 +1529,7 @@ class CallGraphVisualizer(QMainWindow):
                     # Get the common directory containing all files
                     common_dir = os.path.commonpath([os.path.abspath(f) for f in path])
                     if os.path.isdir(common_dir):
-                        include_dirs = get_all_subdirectories(common_dir)
+                        include_dirs = get_all_subdirectories(common_dir)[:MAX_INCLUDE_DIRS]
             else:
                 # Single file - check if it's a C file or assembly file
                 if path.endswith('.c'):
@@ -1544,10 +1547,10 @@ class CallGraphVisualizer(QMainWindow):
                 self.directory_assembly_files = []
                 self.directory_assembly_files = []
                 self.selected_file_filter = None  # Reset filter
-                # Get directory containing the file and all its subdirectories
+                # Use only the file's directory for includes (avoid E2BIG from get_all_subdirectories on e.g. $HOME)
                 file_dir = os.path.dirname(os.path.abspath(path))
                 if file_dir and os.path.isdir(file_dir):
-                    include_dirs = get_all_subdirectories(file_dir)
+                    include_dirs = [os.path.abspath(file_dir)]
             
             if not c_filenames and not assembly_files:
                 QMessageBox.warning(self, "No Files", 
