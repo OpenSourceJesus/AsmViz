@@ -36,6 +36,86 @@ def get_fake_libc_include_path():
     return None
 
 
+def get_c_compiler_script_path():
+    """
+    Locate compiler.py for the custom c-compiler.
+
+    Search order:
+      1. C_COMPILER or ASMVIZ_C_COMPILER env var (file path or directory)
+      2. AsmViz/c-compiler/compiler.py
+      3. ~/C-Compiler/compiler.py
+      4. ../C-Compiler/compiler.py (sibling of AsmViz)
+
+    Returns:
+        str: Absolute path to compiler.py, or None if not found
+    """
+    def _normalize(path):
+        path = os.path.expanduser(path)
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            path = os.path.join(path, 'compiler.py')
+        return path if os.path.isfile(path) else None
+
+    for env_var in ('C_COMPILER', 'ASMVIZ_C_COMPILER'):
+        env_path = os.environ.get(env_var)
+        if env_path:
+            resolved = _normalize(env_path)
+            if resolved:
+                return resolved
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(script_dir, 'c-compiler', 'compiler.py'),
+        os.path.expanduser('~/C-Compiler/compiler.py'),
+        os.path.join(script_dir, '..', 'C-Compiler', 'compiler.py'),
+    ]
+    for candidate in candidates:
+        resolved = _normalize(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def is_elf_binary(path):
+    """Return True if path looks like an ELF object/shared library/executable."""
+    try:
+        with open(path, 'rb') as f:
+            return f.read(4) == b'\x7fELF'
+    except OSError:
+        return False
+
+
+def disassemble_binary_to_file(path, output_path):
+    """
+    Disassemble a binary with objdump -d and write the output to output_path.
+
+    Returns:
+        str: Absolute path to output_path on success
+
+    Raises:
+        FileNotFoundError: If path or objdump is missing
+        RuntimeError: If objdump fails
+    """
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Binary not found: {path}")
+
+    result = subprocess.run(
+        ['objdump', '-d', path],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or 'unknown error').strip()
+        raise RuntimeError(f"objdump failed for {path}: {err}")
+
+    with open(output_path, 'w', encoding='utf-8', errors='replace') as out:
+        out.write(result.stdout)
+
+    return os.path.abspath(output_path)
+
+
 def get_all_subdirectories(directory):
     """
     Get all subdirectories of a directory recursively.
@@ -207,11 +287,10 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
     
     try:
         # Get the path to the c-compiler script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        compiler_script = os.path.join(script_dir, 'c-compiler', 'compiler.py')
+        compiler_script = get_c_compiler_script_path()
         
-        if not os.path.exists(compiler_script):
-            print(f"Warning: c-compiler not found at {compiler_script}", file=sys.stderr)
+        if not compiler_script:
+            print("Warning: c-compiler not found (set C_COMPILER or install at ~/C-Compiler)", file=sys.stderr)
             for name in function_names:
                 if name not in function_assemblies:
                     function_assemblies[name] = "c-compiler not found"
@@ -224,7 +303,7 @@ def extract_assembly_with_c_compiler(c_filenames, function_names, existing_assem
             asm_files.append(asm_file)
             
             # Build command with include directories
-            cmd = ['/usr/bin/python3', compiler_script, c_file, '-o', asm_file, '--no-assemble']
+            cmd = [sys.executable, compiler_script, c_file, '-o', asm_file, '--no-assemble']
             # Add fake_libc_include if available
             fake_libc_include = get_fake_libc_include_path()
             if fake_libc_include:
@@ -595,6 +674,92 @@ def extract_assembly_for_functions(c_filenames, function_names, assembly_files=N
             if os.path.exists(temp_dir):
                 os.rmdir(temp_dir)
         except:
+            pass
+
+
+def compile_c_to_assembly_text(c_filename, compiler='gcc', optimization='O0', include_dirs=None):
+    """
+    Compile a single C file to assembly and return the full output as text.
+
+    Args:
+        c_filename: Path to the C source file
+        compiler: 'gcc', 'clang', or '@c-compiler'
+        optimization: Optimization level for gcc/clang (ignored for @c-compiler)
+        include_dirs: Optional list of include directories (-I flags)
+
+    Returns:
+        str: Full assembly source, or an error message string on failure
+    """
+    if include_dirs is None:
+        include_dirs = []
+
+    if not os.path.isfile(c_filename):
+        return f"; File not found: {c_filename}"
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        base_name = os.path.basename(c_filename)
+
+        if compiler == '@c-compiler':
+            compiler_script = get_c_compiler_script_path()
+            if not compiler_script:
+                return "; c-compiler not found (set C_COMPILER or install at ~/C-Compiler)"
+
+            asm_file = os.path.join(temp_dir, base_name + '.asm')
+            cmd = [sys.executable, compiler_script, c_filename, '-o', asm_file, '--no-assemble']
+            fake_libc_include = get_fake_libc_include_path()
+            if fake_libc_include:
+                cmd.extend(['-I', fake_libc_include])
+            for include_dir in include_dirs:
+                cmd.extend(['-I', include_dir])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=os.path.dirname(compiler_script),
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or 'unknown error').strip()
+                return f"; c-compiler failed:\n; {err}"
+
+            if not os.path.exists(asm_file):
+                return "; c-compiler produced no output"
+
+            with open(asm_file, 'r') as f:
+                return f.read()
+
+        compiler_cmd = compiler if compiler in ['gcc', 'clang'] else 'gcc'
+        asm_file = os.path.join(temp_dir, base_name + '.s')
+        cmd = [compiler_cmd, '-S', '-DGCC', f'-{optimization}', '-o', asm_file, c_filename]
+        fake_libc_include = get_fake_libc_include_path()
+        if fake_libc_include:
+            cmd.extend(['-I', fake_libc_include])
+        for include_dir in include_dirs:
+            cmd.extend(['-I', include_dir])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or 'unknown error').strip()
+            return f"; {compiler_cmd} failed:\n; {err}"
+
+        if not os.path.exists(asm_file):
+            return f"; {compiler_cmd} produced no output"
+
+        with open(asm_file, 'r') as f:
+            return f.read()
+
+    except subprocess.TimeoutExpired:
+        return f"; {compiler} timed out"
+    except Exception as e:
+        return f"; Assembly unavailable: {e}"
+    finally:
+        try:
+            for name in os.listdir(temp_dir):
+                os.remove(os.path.join(temp_dir, name))
+            os.rmdir(temp_dir)
+        except OSError:
             pass
 
 
