@@ -35,14 +35,19 @@ class AssemblyComparisonPDF(FPDF):
         self.set_margins(MARGIN, MARGIN, MARGIN)
 
 
-def _sanitize_line(line, max_chars):
+def _normalize_line(line):
     if line is None:
         return ''
-    line = line.replace('\t', '    ')
-    line = line.rstrip('\r\n')
-    if len(line) > max_chars:
-        return line[: max_chars - 3] + '...'
-    return line
+    return line.replace('\t', '    ').rstrip('\r\n')
+
+
+def _wrap_line(pdf, line, col_w):
+    """Split a line into rows that fit the column width without truncating."""
+    line = _normalize_line(line)
+    if not line:
+        return ['']
+    pdf.set_font(FONT, '', FONT_SIZE)
+    return pdf.multi_cell(col_w, LINE_HEIGHT, line, dry_run=True, output='LINES')
 
 
 def _split_lines(text):
@@ -58,11 +63,6 @@ def _column_width(pdf):
 
 def _content_bottom(pdf):
     return pdf.h - MARGIN
-
-
-def _chars_per_column(pdf):
-    col_w = _column_width(pdf)
-    return max(32, int(col_w / (FONT_SIZE * 0.45)))
 
 
 def _start_page(pdf, title, left_header, right_header):
@@ -81,60 +81,56 @@ def _start_page(pdf, title, left_header, right_header):
     return y + 5
 
 
+def _write_wrapped_row(pdf, y, left, right, col_w, bottom):
+    if y + LINE_HEIGHT > bottom:
+        y = _start_page(
+            pdf,
+            pdf._continued_title,
+            pdf._left_header,
+            pdf._right_header,
+        )
+        bottom = _content_bottom(pdf)
+
+    pdf.set_font(FONT, '', FONT_SIZE)
+    pdf.set_xy(MARGIN, y)
+    pdf.cell(col_w, LINE_HEIGHT, left, border=0)
+    pdf.set_xy(MARGIN + col_w + COL_GAP, y)
+    pdf.cell(col_w, LINE_HEIGHT, right, border=0)
+    return y + LINE_HEIGHT
+
+
+def _write_two_column_line_pair(pdf, y, left_line, right_line, col_w, bottom):
+    left_rows = _wrap_line(pdf, left_line, col_w)
+    right_rows = _wrap_line(pdf, right_line, col_w)
+    for left, right in zip_longest(left_rows, right_rows, fillvalue=''):
+        y = _write_wrapped_row(pdf, y, left, right, col_w, bottom)
+    return y
+
+
 def _write_two_column_lines(pdf, y_start, left_lines, right_lines):
     col_w = _column_width(pdf)
     bottom = _content_bottom(pdf)
-    max_lines = max(len(left_lines), len(right_lines))
     y = y_start
-    pdf.set_font(FONT, '', FONT_SIZE)
+    max_lines = max(len(left_lines), len(right_lines))
 
     for i in range(max_lines):
-        if y + LINE_HEIGHT > bottom:
-            y = _start_page(
-                pdf,
-                pdf._continued_title,
-                pdf._left_header,
-                pdf._right_header,
-            )
-
         left = left_lines[i] if i < len(left_lines) else ''
         right = right_lines[i] if i < len(right_lines) else ''
-
-        pdf.set_xy(MARGIN, y)
-        pdf.cell(col_w, LINE_HEIGHT, left, border=0)
-        pdf.set_xy(MARGIN + col_w + COL_GAP, y)
-        pdf.cell(col_w, LINE_HEIGHT, right, border=0)
-        y += LINE_HEIGHT
+        y = _write_two_column_line_pair(pdf, y, left, right, col_w, bottom)
 
     return y + 4
 
 
-def _write_two_column_streams(pdf, y_start, left_path, right_path, max_chars):
+def _write_two_column_streams(pdf, y_start, left_path, right_path):
     col_w = _column_width(pdf)
     bottom = _content_bottom(pdf)
     y = y_start
-    pdf.set_font(FONT, '', FONT_SIZE)
 
     with open(left_path, 'r', encoding='utf-8', errors='replace') as left_file, open(
         right_path, 'r', encoding='utf-8', errors='replace'
     ) as right_file:
         for left_line, right_line in zip_longest(left_file, right_file, fillvalue=''):
-            if y + LINE_HEIGHT > bottom:
-                y = _start_page(
-                    pdf,
-                    pdf._continued_title,
-                    pdf._left_header,
-                    pdf._right_header,
-                )
-
-            left = _sanitize_line(left_line, max_chars)
-            right = _sanitize_line(right_line, max_chars)
-
-            pdf.set_xy(MARGIN, y)
-            pdf.cell(col_w, LINE_HEIGHT, left, border=0)
-            pdf.set_xy(MARGIN + col_w + COL_GAP, y)
-            pdf.cell(col_w, LINE_HEIGHT, right, border=0)
-            y += LINE_HEIGHT
+            y = _write_two_column_line_pair(pdf, y, left_line, right_line, col_w, bottom)
 
     return y + 4
 
@@ -200,7 +196,6 @@ def generate_assembly_comparison_pdf(input_path, output_path=None, optimization=
     pdf._continued_title = ''
     pdf._left_header = 'GCC'
     pdf._right_header = 'c-compiler'
-    max_chars = _chars_per_column(pdf)
 
     for c_file in c_files:
         rel_name = os.path.relpath(c_file, os.path.dirname(c_files[0]))
@@ -216,8 +211,8 @@ def generate_assembly_comparison_pdf(input_path, output_path=None, optimization=
             c_file, compiler='@c-compiler', include_dirs=include_dirs
         )
 
-        left_lines = [_sanitize_line(line, max_chars) for line in _split_lines(gcc_asm)]
-        right_lines = [_sanitize_line(line, max_chars) for line in _split_lines(custom_asm)]
+        left_lines = [_normalize_line(line) for line in _split_lines(gcc_asm)]
+        right_lines = [_normalize_line(line) for line in _split_lines(custom_asm)]
 
         left_header = f'GCC (-{optimization})'
         right_header = 'c-compiler'
@@ -274,10 +269,9 @@ def generate_binary_comparison_pdf(left_path, right_path, output_path=None):
         pdf._left_header = left_header
         pdf._right_header = right_header
 
-        max_chars = _chars_per_column(pdf)
         y = _start_page(pdf, section_title, left_header, right_header)
         print('Writing PDF...', file=sys.stderr)
-        _write_two_column_streams(pdf, y, left_dump, right_dump, max_chars)
+        _write_two_column_streams(pdf, y, left_dump, right_dump)
         pdf.output(output_path)
         return output_path
     finally:
